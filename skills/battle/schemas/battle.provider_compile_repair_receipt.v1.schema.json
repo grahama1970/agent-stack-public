@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-skills.local/battle/schemas/battle.provider_compile_repair_receipt.v1.schema.json",
+  "title": "Battle provider compile repair receipt v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "status",
+    "final_status",
+    "max_compile_repairs",
+    "attempts",
+    "source_specimen_sha256",
+    "judge_status",
+    "original_specimen_retained",
+    "selected_specimen_sha256",
+    "repair_history_required"
+  ],
+  "properties": {
+    "schema": {
+      "const": "battle.provider_compile_repair_receipt.v1"
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "BLOCKED"
+      ]
+    },
+    "final_status": {
+      "enum": [
+        "PASS",
+        "COMPILE_FAILED",
+        "REPAIR_EXHAUSTED",
+        "HASH_CHAIN_MISMATCH"
+      ]
+    },
+    "max_compile_repairs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "source_specimen_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "final_specimen_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "judge_status": {
+      "type": "string"
+    },
+    "attempts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": [
+          "attempt",
+          "status",
+          "specimen_sha256",
+          "stderr_sha256",
+          "command",
+          "timeout_s"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "BLOCKED"
+            ]
+          },
+          "compile_status": {
+            "type": "string"
+          },
+          "specimen_sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "stderr_sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeout_s": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "provider_response_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "authorization_chain": {
+      "type": "array"
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "original_specimen_retained": {
+      "type": "boolean"
+    },
+    "selected_specimen_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "repair_history_required": {
+      "type": "boolean"
+    },
+    "accepted_repaired_artifact_provenance": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  }
+}

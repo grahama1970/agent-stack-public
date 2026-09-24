@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.campaign_clock.v1",
+  "title": "Battle campaign clock v1",
+  "type": "object",
+  "required": ["schema", "status", "battle_id", "run_id", "clock", "start_monotonic_ns", "end_monotonic_ns", "concurrency_basis", "duration_components", "activity_count", "activity_ids"],
+  "properties": {
+    "schema": {"const": "battle.campaign_clock.v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "battle_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "clock": {"const": "monotonic_ns"},
+    "start_monotonic_ns": {"type": "integer"},
+    "end_monotonic_ns": {"type": "integer"},
+    "concurrency_basis": {"const": "explicit_activity_records_only_not_adjacent_wall_clock"},
+    "duration_components": {
+      "type": "array",
+      "items": {"enum": ["queue_seconds", "provider_seconds", "build_seconds", "runtime_seconds", "replay_seconds"]}
+    },
+    "activity_count": {"type": "integer", "minimum": 1},
+    "activity_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "additionalProperties": true
+}

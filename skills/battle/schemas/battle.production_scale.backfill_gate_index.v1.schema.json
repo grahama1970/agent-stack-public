@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Battle production-scale backfill gate index v1",
+  "type": "object",
+  "required": ["schema", "status", "archive_root", "declared_archive_scope", "disposition_counts", "entries"],
+  "properties": {
+    "schema": {"const": "battle.production_scale.backfill_gate_index.v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "recomputed": {"type": "boolean"},
+    "archive_root": {"type": "string"},
+    "declared_archive_scope": {
+      "type": "object",
+      "required": ["patterns", "item_count"],
+      "properties": {
+        "patterns": {"type": "array", "items": {"type": "string"}},
+        "item_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "disposition_counts": {"type": "object"},
+    "revoked_count": {"type": "integer", "minimum": 0},
+    "unparseable_count": {"type": "integer", "minimum": 0},
+    "missing_dependency_count": {"type": "integer", "minimum": 0},
+    "unverified_count": {"type": "integer", "minimum": 0},
+    "downstream_revocation_count": {"type": "integer", "minimum": 0},
+    "downstream_revocations": {"type": "array", "items": {"type": "object"}},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["schema", "path", "kind", "original_sha256", "disposition"],
+        "properties": {
+          "schema": {"const": "battle.production_scale.backfill_gate_audit.v1"},
+          "path": {"type": "string"},
+          "kind": {"type": "string"},
+          "original_sha256": {"type": ["string", "null"]},
+          "original_status": {"type": ["string", "null"]},
+          "winner": {},
+          "disposition": {"enum": ["valid_under_original_contract", "revoked_false_green", "unparseable", "missing_dependency", "unverified"]},
+          "eligibility": {"type": "string"},
+          "execution_issues": {"type": "array", "items": {"type": "object"}},
+          "dependency_problems": {"type": "array", "items": {"type": "object"}},
+          "source_revocation": {"type": "string"},
+          "error": {"type": "string"}
+        }
+      }
+    },
+    "created_at": {"type": "string"},
+    "non_claims": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "persona_dream.edit_intent.v1.schema.json",
+  "title": "Persona Dream typed edit intent (planning-only boundary)",
+  "description": "A typed edit intent names exactly one storyboard panel frame target in one frozen revision, the requested change, preservation constraints, and a planning-only execution boundary. Compiling it produces a dependency-aware revision plan; it never activates a successor, calls a provider, or writes persona memory.",
+  "type": "object",
+  "required": [
+    "schema",
+    "intent_id",
+    "target",
+    "requested_change",
+    "preservation_constraints",
+    "execution_boundary"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "persona_dream.edit_intent.v1"
+    },
+    "intent_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Caller-chosen stable intent identifier; echoed into the plan."
+    },
+    "target": {
+      "type": "object",
+      "required": ["run_id", "revision_id", "panel_id", "artifact_role", "expected_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "revision_id": {"type": "string", "minLength": 1},
+        "panel_id": {"type": "string", "pattern": "^sb_[0-9]{3}$"},
+        "artifact_role": {"type": "string", "enum": ["start_frame", "end_frame"]},
+        "expected_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "requested_change": {
+      "type": "object",
+      "required": ["kind", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "replace_panel_frame",
+            "revise_panel_prompt",
+            "identity_source_change"
+          ],
+          "description": "identity_source_change is recognized but always refused as out of scope for a panel edit intent; identity truth changes flow through create_successor_revision.py, not through edit planning."
+        },
+        "description": {"type": "string", "minLength": 1}
+      }
+    },
+    "preservation_constraints": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "identity_source_unchanged",
+          "untouched_panels_reused_by_hash",
+          "no_provider_submission",
+          "historical_receipts_preserved",
+          "target_only_no_downstream_propagation"
+        ]
+      }
+    },
+    "execution_boundary": {
+      "const": "planning_only",
+      "description": "The only accepted boundary. Planning writes a plan artifact plus receipt; it never activates a successor revision, never calls a provider, and never writes persona memory."
+    }
+  }
+}

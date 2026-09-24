@@ -1,0 +1,840 @@
+"""Deterministic Red/Blue artifact compile, review, and handoff pipeline."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import shutil
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+
+PRIVATE_MARKERS = (
+    "arena/private/",
+    "hidden-ground-truth.json",
+    "hidden-vulnerability-ledger.json",
+    "judge/oracle/",
+)
+
+TEAM_TAU_ROLES = {
+    "red": "red_case_proposal",
+    "blue": "blue_patch_proposal",
+}
+TAU_TEAM_TASK_SCHEMA = "tau.battle_team_task_id.v1"
+TAU_AUTHORING_ROUTER = "tau.battle_live_handoff"
+REQUIRED_AUTHORITY_REFS = ("authorization_receipt_sha256", "evaluator_lock_sha256")
+NON_COMPETITIVE_TAU_STATES = {
+    "CANCELLED",
+    "CANCELED",
+    "CANCELLATION_REQUESTED",
+    "MALFORMED_RESPONSE",
+    "PROVIDER_QUOTA_EXCEEDED",
+    "QUOTA_EXCEEDED",
+    "TIMEOUT",
+}
+NON_COMPETITIVE_TAU_MARKERS = ("cancel", "malformed", "quota", "timeout")
+
+
+def review_artifact_errors(team: str, text: str) -> list[str]:
+    """Deterministic review scan for one artifact's source text.
+
+    Shared gate logic: the same private-marker + role-interface checks the live
+    pipeline applies to a champion are reused by the mutation-load specimen gate so
+    both measure viability with an identical rule set (no divergent copy).
+    """
+    lowered = text.lower()
+    errors: list[str] = [
+        f"private marker present: {marker}"
+        for marker in PRIVATE_MARKERS
+        if marker in lowered
+    ]
+    if team == "red" and not _red_binds_public_app_import_zip(text):
+        errors.append("red artifact does not bind the public app import interface")
+    if team == "blue" and "def import_zip" not in lowered:
+        errors.append("blue artifact does not preserve import_zip interface")
+    return errors
+
+
+def _red_binds_public_app_import_zip(text: str) -> bool:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    direct_names, module_names = _local_app_import_zip_bindings(tree)
+    return (
+        bool(direct_names)
+        or any(
+            _is_local_import_zip_lookup(node, module_names) for node in ast.walk(tree)
+        )
+        or bool(_local_import_zip_factory_names(tree, module_names))
+    )
+
+
+def _local_app_import_zip_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+    direct_names: set[str] = set()
+    module_names: set[str] = set()
+    importlib_names = {"importlib"}
+    import_module_names: set[str] = set()
+    importlib_util_names = {"importlib.util"}
+    spec_from_file_location_names: set[str] = set()
+    module_from_spec_names: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "app":
+                direct_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "import_zip"
+                )
+            elif node.module == "importlib":
+                for alias in node.names:
+                    if alias.name == "import_module":
+                        import_module_names.add(alias.asname or alias.name)
+                    elif alias.name == "util":
+                        importlib_util_names.add(alias.asname or alias.name)
+            elif node.module == "importlib.util":
+                for alias in node.names:
+                    if alias.name == "spec_from_file_location":
+                        spec_from_file_location_names.add(alias.asname or alias.name)
+                    elif alias.name == "module_from_spec":
+                        module_from_spec_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", 1)[0]
+                if alias.name == "app":
+                    module_names.add(bound_name)
+                elif alias.name == "importlib":
+                    importlib_names.add(bound_name)
+                elif alias.name == "importlib.util":
+                    importlib_util_names.add(alias.asname or alias.name)
+
+    assignments = _name_assignments(tree)
+    spec_names = {
+        name
+        for name, value in assignments.items()
+        if isinstance(value, ast.Call)
+        and _is_importlib_util_call(
+            value.func,
+            importlib_util_names=importlib_util_names,
+            direct_names=spec_from_file_location_names,
+            attr_name="spec_from_file_location",
+        )
+        and len(value.args) >= 2
+        and _is_local_app_path(value.args[1], assignments, set())
+    }
+
+    for name, value in assignments.items():
+        if isinstance(value, ast.Call) and (
+            _is_importlib_import_module_call(
+                value,
+                importlib_names=importlib_names,
+                direct_names=import_module_names,
+            )
+            or (
+                _is_importlib_util_call(
+                    value.func,
+                    importlib_util_names=importlib_util_names,
+                    direct_names=module_from_spec_names,
+                    attr_name="module_from_spec",
+                )
+                and value.args
+                and isinstance(value.args[0], ast.Name)
+                and value.args[0].id in spec_names
+            )
+        ):
+            module_names.add(name)
+
+    spec_module_names = {
+        name
+        for name, value in assignments.items()
+        if isinstance(value, ast.Call)
+        and _is_importlib_util_call(
+            value.func,
+            importlib_util_names=importlib_util_names,
+            direct_names=module_from_spec_names,
+            attr_name="module_from_spec",
+        )
+    }
+    loaded_module_names = {
+        name
+        for name in module_names
+        if name not in spec_module_names
+        or _executes_local_module(tree, name, spec_names)
+    }
+    module_factory_names = _local_app_module_factory_names(tree, loaded_module_names)
+    for name, value in assignments.items():
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in module_factory_names
+        ):
+            loaded_module_names.add(name)
+    return direct_names, loaded_module_names
+
+
+def _name_assignments(tree: ast.AST) -> dict[str, ast.AST]:
+    assignments: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments.setdefault(target.id, node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            assignments.setdefault(node.target.id, node.value)
+    return assignments
+
+
+def _local_app_module_factory_names(
+    tree: ast.AST, module_names: set[str]
+) -> set[str]:
+    factory_names: set[str] = set()
+    for function in (
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    ):
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in module_names
+            ):
+                factory_names.add(function.name)
+    return factory_names
+
+
+def _local_import_zip_factory_names(tree: ast.AST, module_names: set[str]) -> set[str]:
+    factory_names: set[str] = set()
+    for function in (
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    ):
+        local_callables: set[str] = set()
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and _is_local_import_zip_lookup(
+                        node.value, module_names
+                    ):
+                        local_callables.add(target.id)
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and _is_local_import_zip_lookup(node.value, module_names)
+            ):
+                local_callables.add(node.target.id)
+            elif isinstance(node, ast.Return):
+                if _is_local_import_zip_lookup(node.value, module_names):
+                    factory_names.add(function.name)
+                elif (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in local_callables
+                ):
+                    factory_names.add(function.name)
+    return factory_names
+
+
+def _executes_local_module(
+    tree: ast.AST, module_name: str, spec_names: set[str]
+) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "exec_module"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "loader"
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id in spec_names
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == module_name
+        for node in ast.walk(tree)
+    )
+
+
+def _is_local_import_zip_lookup(node: ast.AST, module_names: set[str]) -> bool:
+    if isinstance(node, ast.Attribute):
+        return (
+            node.attr == "import_zip"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in module_names
+        )
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in module_names
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "import_zip"
+    )
+
+
+def _is_importlib_import_module_call(
+    node: ast.Call, *, importlib_names: set[str], direct_names: set[str]
+) -> bool:
+    if not node.args or not (
+        isinstance(node.args[0], ast.Constant) and node.args[0].value == "app"
+    ):
+        return False
+    dotted = _dotted_name(node.func)
+    if dotted in direct_names:
+        return True
+    return any(dotted == f"{name}.import_module" for name in importlib_names)
+
+
+def _is_importlib_util_call(
+    node: ast.AST,
+    *,
+    importlib_util_names: set[str],
+    direct_names: set[str],
+    attr_name: str,
+) -> bool:
+    dotted = _dotted_name(node)
+    if dotted in direct_names:
+        return True
+    return any(dotted == f"{name}.{attr_name}" for name in importlib_util_names)
+
+
+def _is_local_app_path(
+    node: ast.AST, assignments: dict[str, ast.AST], seen: set[str]
+) -> bool:
+    if isinstance(node, ast.Name) and node.id not in seen and node.id in assignments:
+        return _is_local_app_path(assignments[node.id], assignments, seen | {node.id})
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "str"
+        and len(node.args) == 1
+    ):
+        return _is_local_app_path(node.args[0], assignments, seen)
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Div)
+        and isinstance(node.right, ast.Constant)
+        and node.right.value == "app.py"
+        and isinstance(node.left, ast.Call)
+        and _dotted_name(node.left.func) == "Path.cwd"
+        and not node.left.args
+    )
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_name(node.value)
+        return f"{parent}.{node.attr}" if parent else None
+    return None
+
+
+def tau_authoring_route_errors(
+    *,
+    team: str,
+    battle_id: str,
+    run_id: str,
+    provider_payload: dict[str, Any],
+    materialization_payload: dict[str, Any],
+) -> list[str]:
+    """Return Tau-route contract errors for Red/Blue authored artifacts."""
+
+    expected_role = TEAM_TAU_ROLES[team]
+    errors: list[str] = []
+    provider_task = provider_payload.get("tau_task")
+    materialized_task = materialization_payload.get("tau_task")
+    if not isinstance(provider_task, dict) or not isinstance(materialized_task, dict):
+        return ["Tau authoring route missing typed task ids"]
+    task_id = provider_task.get("id")
+    expected_task_prefix = f"{battle_id}/{run_id}/{team}/{expected_role}"
+    if not isinstance(task_id, str) or not task_id:
+        errors.append("Tau authoring route missing typed task id")
+    elif task_id != expected_task_prefix and not task_id.startswith(
+        f"{expected_task_prefix}/"
+    ):
+        errors.append("Tau authoring route task id does not match Battle team role")
+    if materialized_task.get("id") != task_id:
+        errors.append("Tau materialization task id does not match provider task id")
+    for payload_name, task in (("provider", provider_task), ("materialization", materialized_task)):
+        if task.get("schema") != TAU_TEAM_TASK_SCHEMA:
+            errors.append(f"Tau {payload_name} task id is not typed")
+        if task.get("battle_id") != battle_id:
+            errors.append(f"Tau {payload_name} task battle_id mismatch")
+        if task.get("run_id") != run_id:
+            errors.append(f"Tau {payload_name} task run_id mismatch")
+        if task.get("team") != team:
+            errors.append(f"Tau {payload_name} task team mismatch")
+        if task.get("role") != expected_role:
+            errors.append(f"Tau {payload_name} task role mismatch")
+
+    provider_route = provider_payload.get("route_identity")
+    materialized_route = materialization_payload.get("route_identity")
+    if not isinstance(provider_route, dict) or not isinstance(materialized_route, dict):
+        errors.append("Tau authoring route identity missing")
+    else:
+        expected_route_prefix = f"tau://{battle_id}/{run_id}/{team}/{expected_role}"
+        for route_name, route in (("provider", provider_route), ("materialization", materialized_route)):
+            if route.get("boundary") != "tau":
+                errors.append(f"Tau {route_name} route boundary mismatch")
+            route_id = route.get("route_id")
+            if not isinstance(route_id, str) or not route_id:
+                errors.append(f"Tau {route_name} route id missing")
+            elif route_id != expected_route_prefix and not route_id.startswith(
+                f"{expected_route_prefix}/"
+            ):
+                errors.append(f"Tau {route_name} route id does not match Battle team role")
+            router = route.get("router")
+            if not isinstance(router, str) or not router:
+                errors.append(f"Tau {route_name} route router missing")
+            elif router.startswith("battle"):
+                errors.append(f"Tau {route_name} route uses Battle-local provider path")
+            elif router != TAU_AUTHORING_ROUTER:
+                errors.append(
+                    f"Tau {route_name} route router is not {TAU_AUTHORING_ROUTER}"
+                )
+        if provider_route.get("route_id") != materialized_route.get("route_id"):
+            errors.append("Tau materialization route id does not match provider route id")
+
+    for payload_name, payload in (("provider", provider_payload), ("materialization", materialization_payload)):
+        authority_refs = payload.get("authority_refs")
+        if not isinstance(authority_refs, dict):
+            errors.append(f"Tau {payload_name} missing authority references")
+        else:
+            for key in REQUIRED_AUTHORITY_REFS:
+                if not authority_refs.get(key):
+                    errors.append(f"Tau {payload_name} missing authority reference: {key}")
+        errors.extend(_non_competitive_state_errors(payload_name, payload))
+        if payload.get("evaluator_authority_override") is not None:
+            errors.append(f"Tau {payload_name} attempted evaluator authority override")
+        if payload.get("evaluator_authority") not in (None, "locked_host_judge"):
+            errors.append(f"Tau {payload_name} evaluator authority is not locked_host_judge")
+
+    provider_authority = provider_payload.get("authority_refs")
+    materialized_authority = materialization_payload.get("authority_refs")
+    if isinstance(provider_authority, dict) and isinstance(materialized_authority, dict):
+        for key in REQUIRED_AUTHORITY_REFS:
+            if provider_authority.get(key) != materialized_authority.get(key):
+                errors.append(f"Tau materialization authority reference mismatch: {key}")
+
+    retained = materialization_payload.get("retained_response_receipt")
+    if not isinstance(retained, dict) or not retained.get("path") or not retained.get("sha256"):
+        errors.append("Tau materialization missing retained response receipt")
+    else:
+        errors.extend(_retained_response_errors(retained))
+        declared_sha = _normalized_sha(materialization_payload.get("scillm_call_receipt_sha256"))
+        if not declared_sha:
+            errors.append("Tau materialization missing SciLLM call receipt binding")
+        elif declared_sha != _normalized_sha(retained.get("sha256")):
+            errors.append(
+                "Tau materialization SciLLM call receipt binding does not match retained response receipt"
+            )
+    return errors
+
+
+def _non_competitive_state_errors(payload_name: str, payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for key in ("status", "failure_code", "error_type", "reason"):
+        value = payload.get(key)
+        if isinstance(value, str) and _is_non_competitive_state(value):
+            errors.append(f"Tau {payload_name} non-competitive state cannot be a win: {key}={value}")
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in ("status", "failure_code", "error_type", "reason"):
+            value = result.get(key)
+            if isinstance(value, str) and _is_non_competitive_state(value):
+                errors.append(f"Tau {payload_name} non-competitive result cannot be a win: {key}={value}")
+    return errors
+
+
+def _is_non_competitive_state(value: str) -> bool:
+    normalized = value.strip().upper().replace("-", "_")
+    if normalized in NON_COMPETITIVE_TAU_STATES:
+        return True
+    lowered = value.strip().lower().replace("-", "_")
+    return any(marker in lowered for marker in NON_COMPETITIVE_TAU_MARKERS)
+
+
+def _normalized_sha(value: Any) -> str:
+    return str(value or "").removeprefix("sha256:")
+
+
+def _retained_response_errors(retained: dict[str, Any]) -> list[str]:
+    path = Path(str(retained.get("path"))).expanduser()
+    expected = _normalized_sha(retained.get("sha256"))
+    try:
+        actual = _sha(path)
+    except OSError as exc:
+        return [f"Tau materialization retained response receipt unreadable: {exc}"]
+    if actual != expected:
+        return ["Tau materialization retained response receipt sha mismatch"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Tau materialization retained response receipt unparseable: {exc}"]
+    if not isinstance(payload, dict):
+        return ["Tau materialization retained response receipt is not a JSON object"]
+    statuses: list[tuple[str, str]] = []
+    status = payload.get("status")
+    if isinstance(status, str) and status:
+        statuses.append(("status", status))
+    result = payload.get("result")
+    if isinstance(result, dict):
+        result_status = result.get("status")
+        if isinstance(result_status, str) and result_status:
+            statuses.append(("result.status", result_status))
+    if not statuses:
+        return ["Tau materialization retained response receipt missing status"]
+    for name, value in statuses:
+        if _is_non_competitive_state(value):
+            return [
+                f"Tau materialization retained response receipt non-competitive status cannot be a win: {name}={value}"
+            ]
+        if value.strip().upper() != "PASS":
+            return [
+                f"Tau materialization retained response receipt status is not PASS: {name}={value}"
+            ]
+    return []
+
+
+def annotate_tau_authoring_route_receipts(
+    *,
+    battle_id: str,
+    run_id: str,
+    team: str,
+    worker_id: str,
+    provider_receipt: Path,
+    materialization_receipt: Path,
+    scillm_call_receipt: Path,
+    authority_refs: dict[str, str],
+) -> None:
+    """Bind legacy Tau worker receipts to Battle's typed authoring route."""
+
+    role = TEAM_TAU_ROLES[team]
+    task = {
+        "schema": TAU_TEAM_TASK_SCHEMA,
+        "id": f"{battle_id}/{run_id}/{team}/{role}/{worker_id}",
+        "battle_id": battle_id,
+        "run_id": run_id,
+        "team": team,
+        "role": role,
+        "worker_id": worker_id,
+    }
+    route = {
+        "boundary": "tau",
+        "router": "tau.battle_live_handoff",
+        "route_id": f"tau://{battle_id}/{run_id}/{team}/{role}/{worker_id}",
+    }
+    retained = {
+        "path": str(scillm_call_receipt),
+        "sha256": _sha(scillm_call_receipt),
+    }
+    for receipt_path in (provider_receipt, materialization_receipt):
+        payload = _read_json(receipt_path)
+        payload.setdefault("tau_task", task)
+        payload.setdefault("route_identity", route)
+        payload["authority_refs"] = dict(authority_refs)
+        payload.setdefault("evaluator_authority", "locked_host_judge")
+        if receipt_path == materialization_receipt:
+            payload["retained_response_receipt"] = retained
+        _write_json(receipt_path, payload)
+
+
+def run_team_artifact_pipeline(
+    *,
+    battle_id: str,
+    run_id: str,
+    generation: int,
+    team: str,
+    source_artifact: Path,
+    provider_receipt: Path,
+    materialization_receipt: Path,
+    target_identity_sha256: str,
+    out_dir: Path,
+    docker_image: str = "python:3.12-slim",
+    genome_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Compile and review one provider materialization without executing it."""
+
+    if team not in {"red", "blue"}:
+        raise ValueError("team must be red or blue")
+    source_artifact = source_artifact.resolve()
+    provider_receipt = provider_receipt.resolve()
+    materialization_receipt = materialization_receipt.resolve()
+    out_dir = out_dir.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    role = "red_exploit" if team == "red" else "blue_patch"
+    provider_payload = _read_json(provider_receipt)
+    materialization_payload = _read_json(materialization_receipt)
+    declared_path = Path(str(materialization_payload.get("path") or "")).resolve()
+    source_sha = _sha(source_artifact)
+    expected_role = "red_exploit" if team == "red" else "blue_patch"
+    input_errors: list[str] = []
+    provider_result = provider_payload.get("result")
+    provider_status = (
+        provider_result.get("status")
+        if isinstance(provider_result, dict)
+        else provider_payload.get("status")
+    )
+    if provider_status != "PASS":
+        input_errors.append("Tau provider/subagent receipt status is not PASS")
+    if materialization_payload.get("status") != "PASS":
+        input_errors.append("Tau materialization receipt status is not PASS")
+    if materialization_payload.get("artifact_type") != expected_role:
+        input_errors.append(
+            "Tau materialization artifact_type does not match team role"
+        )
+    if declared_path != source_artifact:
+        input_errors.append("Tau materialization path does not match source artifact")
+    if materialization_payload.get("artifact_sha256") != source_sha:
+        input_errors.append(
+            "Tau materialization artifact hash does not match source artifact"
+        )
+    if materialization_payload.get("artifact_bytes") != source_artifact.stat().st_size:
+        input_errors.append(
+            "Tau materialization byte count does not match source artifact"
+        )
+    if not materialization_payload.get("scillm_call_receipt_sha256"):
+        input_errors.append("Tau materialization receipt lacks SciLLM call binding")
+    input_errors.extend(
+        tau_authoring_route_errors(
+            team=team,
+            battle_id=battle_id,
+            run_id=run_id,
+            provider_payload=provider_payload,
+            materialization_payload=materialization_payload,
+        )
+    )
+    if input_errors:
+        raise ValueError("; ".join(input_errors))
+    selected_name = "red_exploit_submission.py" if team == "red" else "app.py"
+    selected_path = out_dir / selected_name
+    shutil.copyfile(source_artifact, selected_path)
+
+    descriptor = {
+        "schema": "battle.team_artifact_descriptor.v1",
+        "status": "PASS",
+        "battle_id": battle_id,
+        "run_id": run_id,
+        "generation": generation,
+        "team": team,
+        "artifact_role": role,
+        "language": "python",
+        "source_artifact_sha256": source_sha,
+        "tau_declared_artifact_sha256": materialization_payload["artifact_sha256"],
+        "tau_declared_artifact_bytes": materialization_payload["artifact_bytes"],
+        "tau_strategy_genome_sha256": materialization_payload.get(
+            "strategy_genome_sha256"
+        ),
+        "tau_scillm_call_receipt_sha256": materialization_payload[
+            "scillm_call_receipt_sha256"
+        ],
+        "tau_task": materialization_payload["tau_task"],
+        "route_identity": materialization_payload["route_identity"],
+        "authority_refs": materialization_payload["authority_refs"],
+        "retained_response_receipt": materialization_payload["retained_response_receipt"],
+        "evaluator_authority": "locked_host_judge",
+        "provider_receipt_sha256": _sha(provider_receipt),
+        "materialization_receipt_sha256": _sha(materialization_receipt),
+        "target_identity_sha256": target_identity_sha256,
+        "genome_sha256": genome_sha256,
+        "created_at": _now(),
+    }
+    descriptor_path = _write_json(out_dir / "team-artifact-descriptor.json", descriptor)
+
+    stdout_path = out_dir / "compile.stdout.txt"
+    stderr_path = out_dir / "compile.stderr.txt"
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "64",
+        "--memory",
+        "256m",
+        "--cpus",
+        "1",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=16m",
+        "-e",
+        "PYTHONPYCACHEPREFIX=/tmp/pycache",
+        "--user",
+        "65534:65534",
+        "-v",
+        f"{out_dir}:/work:ro",
+        "-w",
+        "/work",
+        docker_image,
+        "python",
+        "-m",
+        "py_compile",
+        selected_name,
+    ]
+    completed = subprocess.run(
+        command, capture_output=True, text=True, timeout=120, check=False
+    )
+    stdout_path.write_text(completed.stdout, encoding="utf-8")
+    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    compile_status = "PASS" if completed.returncode == 0 else "BLOCKED"
+    selected_sha = _sha(selected_path)
+    docker_image_id = _docker_image_id(docker_image)
+    compile_errors = [] if compile_status == "PASS" else ["COMPILE_FAILED"]
+    if not docker_image_id:
+        compile_status = "BLOCKED"
+        compile_errors.append("DOCKER_IMAGE_ID_UNAVAILABLE")
+    compile_receipt = {
+        "schema": "battle.team_compile_receipt.v2",
+        "status": compile_status,
+        "team": team,
+        "generation": generation,
+        "mocked": False,
+        "live": "docker_python_compile",
+        "compile_status": "PASS" if compile_status == "PASS" else "FAILED",
+        "runtime_status": "NOT_RUN",
+        "target_contact": "NOT_RUN",
+        "judge_status": "NOT_RUN" if compile_status == "PASS" else "JUDGE_NOT_RUN_COMPILE_FAILED",
+        "docker_image": docker_image,
+        "docker_image_id": docker_image_id,
+        "command": command,
+        "docker_command": command,
+        "docker_exit_code": completed.returncode,
+        "source_artifact_sha256": f"sha256:{descriptor['source_artifact_sha256']}",
+        "source_code_sha256": f"sha256:{descriptor['source_artifact_sha256']}",
+        "compile_input_sha256": _sha_prefixed(selected_path),
+        "selected_artifact_sha256": _sha_prefixed(selected_path),
+        "docker_specimen_sha256": _sha_prefixed(selected_path),
+        "target_identity_sha256": target_identity_sha256,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "stdout_sha256": _sha_prefixed(stdout_path),
+        "stderr_sha256": _sha_prefixed(stderr_path),
+        "timeout_s": 120,
+        "errors": sorted(set(compile_errors)),
+        "created_at": _now(),
+    }
+    compile_path = _write_json(out_dir / "compile-receipt.json", compile_receipt)
+
+    errors: list[str] = []
+    if compile_status != "PASS":
+        errors.append("docker compile did not pass")
+    text = selected_path.read_text(encoding="utf-8", errors="replace")
+    errors.extend(review_artifact_errors(team, text))
+    review_status = "PASS" if not errors else "BLOCKED"
+    review = {
+        "schema": "battle.team_artifact_review_receipt.v1",
+        "status": review_status,
+        "team": team,
+        "generation": generation,
+        "descriptor_sha256": _sha(descriptor_path),
+        "compile_receipt_sha256": _sha(compile_path),
+        "selected_artifact_sha256": selected_sha,
+        "provider_receipt_sha256": descriptor["provider_receipt_sha256"],
+        "target_identity_sha256": target_identity_sha256,
+        "checks": {
+            "docker_compile_passed": compile_status == "PASS",
+            "selected_hash_bound": _same_sha(
+                selected_sha, compile_receipt["selected_artifact_sha256"]
+            ),
+            "private_reference_scan_passed": not any(
+                "private marker" in item for item in errors
+            ),
+            "role_interface_preserved": not any("interface" in item for item in errors),
+        },
+        "errors": errors,
+        "created_at": _now(),
+    }
+    review_path = _write_json(out_dir / "artifact-review-receipt.json", review)
+    status = "PASS" if review_status == "PASS" else "BLOCKED"
+    handoff = {
+        "schema": "battle.team_artifact_pipeline_receipt.v1",
+        "status": status,
+        "battle_id": battle_id,
+        "run_id": run_id,
+        "generation": generation,
+        "team": team,
+        "artifact_role": role,
+        "selected_artifact": str(selected_path),
+        "selected_artifact_sha256": selected_sha,
+        "descriptor_sha256": _sha(descriptor_path),
+        "compile_receipt_sha256": _sha(compile_path),
+        "artifact_review_receipt_sha256": _sha(review_path),
+        "provider_receipt_sha256": descriptor["provider_receipt_sha256"],
+        "materialization_receipt_sha256": descriptor["materialization_receipt_sha256"],
+        "target_identity_sha256": target_identity_sha256,
+        "genome_sha256": genome_sha256,
+        "allowed_runner": "battle_docker_judge",
+        "claims": {
+            "proves": [
+                "Battle bound one provider materialization through Docker compile and deterministic review."
+            ]
+            if status == "PASS"
+            else [],
+            "does_not_prove": ["The artifact runs.", "Judge verified an outcome."],
+        },
+        "created_at": _now(),
+    }
+    handoff_path = _write_json(out_dir / "team-artifact-pipeline-receipt.json", handoff)
+    return {
+        "status": status,
+        "descriptor_path": descriptor_path,
+        "compile_receipt_path": compile_path,
+        "review_receipt_path": review_path,
+        "handoff_path": handoff_path,
+        "selected_artifact_path": selected_path,
+        "selected_artifact_sha256": selected_sha,
+    }
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha_prefixed(path: Path) -> str:
+    return f"sha256:{_sha(path)}"
+
+
+def _same_sha(left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    return left.removeprefix("sha256:") == right.removeprefix("sha256:")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON root must be an object: {path}")
+    return payload
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _docker_image_id(docker_image: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", docker_image, "--format", "{{.Id}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except OSError:
+        return None
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value.startswith("sha256:") else None

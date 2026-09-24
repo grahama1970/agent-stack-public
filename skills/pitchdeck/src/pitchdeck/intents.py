@@ -1,0 +1,793 @@
+"""Deterministic slide-intent materializer (#1278): approved outline -> DeckDocument.
+
+Consumes an APPROVED narrative outline (hash-verified, questions answered),
+the claim ledger, a deck profile, a design system, and the recipe library,
+and emits intent-carrying slides through recipe layout constraints — never
+hand-authored per-deck coordinates and never free-form LLM rewriting.
+Titles are ASSERTION CANDIDATES taken verbatim from bound ledger claims;
+default labels ("The problem", "How it works") are rejected with
+LABEL_HEADLINE. The recipe resolver picks only COMPATIBLE recipes (a
+diagram recipe requires approved diagram data; a proof recipe requires an
+asset) and raises NO_COMPATIBLE_RECIPE with the module named when none fit.
+Appendix/boneyard slides are the explicit intent-exempt class. Failure
+modes are typed: UNAPPROVED_OUTLINE, LABEL_HEADLINE, NO_COMPATIBLE_RECIPE,
+MISSING_VISUAL_THESIS, SOURCELESS_ASSERTION.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .design_system import CompositionRecipe, DeckProfile, DesignSystem, load_recipes
+from .house_spec import HOUSE_BODY_PT, HOUSE_CAPTION_PT
+from .document import (
+    Bbox,
+    DiagramEdge,
+    DiagramNode,
+    IconSpec,
+    DeckDocument,
+    DiagramGraph,
+    DocElement,
+    DocElementKind,
+    DocEntrance,
+    DocSlide,
+    DocTextStyle,
+    SlideIntent,
+)
+from .models import (
+    AssetManifest,
+    BindingKind,
+    ClaimLedger,
+    ContentReveal,
+    DeckMeta,
+    DeckSourcePolicy,
+    SlideLayout,
+    SourceManifest,
+    TextBinding,
+    Visibility,
+)
+from .planning import DeckContext, NarrativeOutline, OutlineModule, PlanningCode
+
+_LABEL_HEADLINES = {
+    "the problem", "problem", "solution", "how it works", "architecture",
+    "results", "roadmap", "overview", "introduction", "background", "value proposition",
+}
+
+# Metaphor badge per module (cybersummit pattern: circular line-icon top-right
+# setting the slide's emotional register). Cover carries the brand, no badge.
+_MODULE_BADGES: dict[str, str] = {
+    "thesis": "compass",
+    "value_prop": "lightbulb",
+    "problem_solution": "lightbulb",
+    "architecture": "route",
+    "proof": "monitor",
+    "roadmap": "flag",
+    "ask": "users",
+}
+
+# Module -> ordered recipe preferences. Compatibility is checked in order.
+_MODULE_RECIPES: dict[str, list[str]] = {
+    "cover": ["cover-brand"],
+    "thesis": ["statement-thesis"],
+    "value_prop": ["statement-thesis"],
+    "problem_solution": ["assertion-chevrons-diagram", "roadmap-lanes"],
+    "architecture": ["one-big-diagram"],
+    "proof": ["proof-screenshot-callout"],
+    "roadmap": ["roadmap-gates", "roadmap-lanes"],
+    "ask": ["statement-thesis"],
+}
+
+_TITLE_STYLE = DocTextStyle(size_pt=40.0, bold=True)
+_HERO_STYLE = DocTextStyle(size_pt=64.0, bold=False, align="center", color="#076889")
+_CHEVRON_STYLE = DocTextStyle(size_pt=HOUSE_BODY_PT)
+_CAPTION_STYLE = DocTextStyle(size_pt=HOUSE_CAPTION_PT)
+
+
+def _compatible(recipe: CompositionRecipe, module: OutlineModule) -> bool:
+    roles = set(r.value for r in recipe.required_roles)
+    if "diagram" in roles and module.diagram is None and recipe.id != "roadmap-gates":
+        # roadmap-lanes SYNTHESIZES its gate diagram deterministically from the
+        # claim's own verbatim list fragments — no approved diagram data needed.
+        return False
+    if "visual" in roles and not module.visual_asset_id:
+        return False
+    return True
+
+
+def _resolve_recipe(module: OutlineModule, recipes: dict[str, CompositionRecipe]) -> CompositionRecipe:
+    for recipe_id in _MODULE_RECIPES.get(module.module, ["statement-thesis"]):
+        recipe = recipes[recipe_id]
+        if _compatible(recipe, module):
+            return recipe
+    raise ValueError(
+        f"{PlanningCode.NO_COMPATIBLE_RECIPE}: module '{module.module}' has no compatible recipe "
+        f"(diagram approved: {module.diagram is not None}, asset: {module.visual_asset_id!r}) — "
+        "approve visual content in the outline or choose a text recipe"
+    )
+
+
+def _assertion_for(module: OutlineModule, deck_title: str, *, use_candidate_renderings: bool = False) -> tuple[str, str | None, str]:
+    """(assertion text, claim_id, transform) — APPROVED rendering if present,
+    else full verbatim claim text. Candidate renderings are used only in
+    explicit preview mode (provenance-stamped, never publishable)."""
+    if module.module == "cover":
+        return deck_title, None, "non_claim"
+    if not module.candidate_assertions:
+        raise ValueError(
+            f"{PlanningCode.NO_COMPATIBLE_RECIPE}: SOURCELESS_ASSERTION — module '{module.module}' has no bound assertion candidates"
+        )
+    approved = [r for r in module.renderings if r.status == "approved"]
+    pool = approved or ([r for r in module.renderings] if use_candidate_renderings else [])
+    if pool:
+        chosen = pool[0]
+        return chosen.text, chosen.claim_id, chosen.transform_class
+    assertion = module.candidate_assertions[0]
+    if assertion.strip().lower().rstrip(".?!") in _LABEL_HEADLINES:
+        raise ValueError(f"LABEL_HEADLINE: module '{module.module}' assertion '{assertion}' is a label, not a takeaway")
+    return assertion, module.candidate_claim_ids[0], "verbatim"
+
+
+def _after_chevrons(reveal: list[str], floor: float) -> float:
+    """Top of the illustration zone: just under the last chevron.
+
+    Corpus slides have no dead band between the takeaways and the artwork
+    (cybersummit-32/47), so the illustration follows the text rather than
+    sitting at a fixed offset."""
+    chevrons = [r for r in reveal if r.startswith("chevron-")]
+    if not chevrons:
+        return floor
+    return round(0.19 + len(chevrons) * 0.082 + 0.04, 3)
+
+
+def _gate_scene(nodes):
+    """Closure gates as a SCENE, not a row of identical shields (#1315).
+
+    The synthesised gate list was five equally weighted, evenly pitched ringed
+    glyphs — the exact composition blind judges scored lowest and the one
+    assert_not_mechanical() refuses. The terminal gate becomes the subject and
+    the rest recede."""
+    from .scenes import SceneError, compose_scene
+
+    if len(nodes) < 2:
+        return None
+    try:
+        return compose_scene(
+            "gate-run",
+            subject_label=nodes[-1].label,
+            icons=[n.icon or "shield-check" for n in (nodes[-1], *nodes[:-1])],
+            support_labels=[n.label for n in nodes[:-1]],
+            node_prefix="gate",
+            binding_paths=["element:diagram"],
+        )
+    except SceneError:
+        return None  # fall back to the row rather than emit a broken scene
+
+
+def _bind_and_return(graph, claim_id: str, bindings: list, claim_texts: dict | None = None):
+    """Bind every label, then hand the graph back for placement."""
+    _bind_diagram_labels(graph, claim_id, bindings, claim_texts)
+    return graph
+
+
+def _classify_label(text: str, claim_text: str):
+    """Truncation only when the text really IS an excerpt; otherwise generalization."""
+    import re as _re
+
+    probe = " ".join((text or "").split()).strip().rstrip(".")
+    if probe and claim_text:
+        pattern = r"(?<![A-Za-z0-9])" + _re.escape(probe) + r"(?![A-Za-z0-9])"
+        if _re.search(pattern, claim_text, flags=_re.IGNORECASE):
+            return BindingKind.CLAIM_QUOTE, "truncation"
+    return BindingKind.CLAIM_PARAPHRASE, "generalization"
+
+
+def _bind_diagram_labels(graph, claim_id: str, bindings: list, claim_texts: dict | None = None) -> None:
+    """Declare a TextBinding for EVERY labelled node and edge (#1328).
+
+    A diagram used to carry one element-level binding, which let a label such as
+    'relevance does not cross this gap' render with no string-level provenance.
+    Each label now names its own path and gets a matching binding carrying the
+    source claim and transform class, so verify-publish can prove the string
+    from the ledger instead of an approvals file enumerating it by hand."""
+    claim_texts = claim_texts or {}
+    declared = {b.path for b in bindings}
+    for node in graph.nodes:
+        if not node.label.strip():
+            continue
+        # An element-level path IS the P0 defect, not a satisfied binding: it
+        # proves the diagram came from a claim, never that THIS label did.
+        # Upgrade it to a per-label path rather than accepting it.
+        # Assign ONCE: validate_assignment re-runs the model validator on every
+        # write, so stripping the coarse path before adding the specific one
+        # would momentarily leave a labelled node unbound and trip its guard.
+        kept = [q for q in node.binding_paths if not q.startswith("element:")]
+        wanted = [f"{node.id}:label"]
+        if (node.sublabel or "").strip():
+            # a sublabel renders as its own visible paragraph, so it needs its
+            # own provenance — a label's binding must not authorize it (#1371)
+            wanted.append(f"{node.id}:sublabel")
+        node.binding_paths = kept + [w for w in wanted if w not in kept]
+        for path in node.binding_paths:
+            if path not in declared:
+                # Classify honestly instead of stamping 'truncation' on everything:
+                # a label that is not a word-boundary excerpt of its claim is a
+                # generalization, which no machine can verify and which therefore
+                # requires human attestation downstream (#1371).
+                source = node.sublabel if path.endswith(":sublabel") else node.label
+                kind, transform = _classify_label(source or "", claim_texts.get(claim_id, ""))
+                bindings.append(TextBinding(path=path, kind=kind, claim_id=claim_id,
+                                            transform_class=transform))
+                declared.add(path)
+    for edge in graph.edges:
+        if edge.decorative or not (edge.label or "").strip():
+            continue
+        kept = [q for q in edge.binding_paths if not q.startswith("element:")]
+        edge.binding_paths = kept + ([f"{edge.id}:label"] if f"{edge.id}:label" not in kept else [])
+        for path in edge.binding_paths:
+            if path not in declared:
+                kind, transform = _classify_label(edge.label or "", claim_texts.get(claim_id, ""))
+                bindings.append(TextBinding(path=path, kind=kind, claim_id=claim_id,
+                                            transform_class=transform))
+                declared.add(path)
+
+
+def _fill_diagram_canvas(graph):
+    """Single-row diagrams fill their box vertically (corpus: the author's
+    diagrams occupy the canvas; ours floated in a narrow band with dead space
+    above and below). Multi-row graphs are left untouched — their vertical
+    structure is meaningful."""
+    rows = {round(node.bbox.y, 3) for node in graph.nodes}
+    if len(rows) != 1:
+        return graph
+    filled = graph.model_copy(deep=True)
+    for node in filled.nodes:
+        node.bbox = node.bbox.model_copy(update={"y": 0.04, "h": 0.92})
+    return filled
+
+
+def _materialize_slide(module: OutlineModule, order: int, recipes, deck_title: str, tagline: str | None = None, *, use_candidate_renderings: bool = False, qualifiers: dict[str, str] | None = None, context_ask: str | None = None, claim_text_map: dict | None = None) -> DocSlide:
+    claim_text_map = claim_text_map or {}
+    recipe = _resolve_recipe(module, recipes)
+    assertion, claim_id, transform = _assertion_for(module, deck_title, use_candidate_renderings=use_candidate_renderings)
+    if assertion.strip().lower().rstrip(".?!") in _LABEL_HEADLINES:
+        raise ValueError(f"LABEL_HEADLINE: '{assertion}'")
+    text_only_recipes = {"statement-thesis", "cover-brand", "roadmap-lanes"}
+    visual_thesis = module.visual_thesis or (
+        "none: text lanes carry the content" if recipe.id in text_only_recipes else ("gate illustration from claim fragments" if recipe.id == "roadmap-gates" else None)
+    )
+    if visual_thesis is None:
+        raise ValueError(f"MISSING_VISUAL_THESIS: module '{module.module}' (recipe {recipe.id})")
+
+    elements: list[DocElement] = []
+    bindings: list[TextBinding] = []
+    claim_ids: list[str] = list(dict.fromkeys(module.candidate_claim_ids))
+    reveal: list[str] = []
+
+    hero = recipe.id in {"cover-brand", "statement-thesis"}
+    if recipe.id == "cover-brand":
+        # One coherent lockup (visual review): wordmark only, generous leading,
+        # tagline on its own clear line — nothing shares a vertical band.
+        assertion = assertion.split("\u2014")[0].split("—")[0].strip()
+        title_bbox = Bbox(x=0.0, y=0.32, w=1.0, h=0.20)  # full-bleed centered display (real cover anatomy)
+    elif hero:
+        title_bbox = Bbox(x=0.08, y=0.22, w=0.84, h=0.26)
+    else:
+        title_bbox = Bbox(x=0.06, y=0.07, w=0.88, h=0.12)
+    # Slice 2: thesis statement renders centered TEAL (exemplar reqml-12)
+    thesis_style = DocTextStyle(size_pt=64.0, bold=True, align="center", color="#065E7C")
+    elements.append(DocElement(id="title", kind=DocElementKind.TEXT, role="title", bbox=title_bbox,
+                               text=assertion,
+                               style=(thesis_style if recipe.id == "statement-thesis" else _HERO_STYLE) if hero else _TITLE_STYLE,
+                               binding_paths=["title"] if claim_id else []))
+    if recipe.id == "statement-thesis":
+        # one large metaphor beneath the assertion (decorative, exemplar pattern)
+        elements.append(DocElement(
+            id="metaphor", kind=DocElementKind.ICON, role="visual",
+            bbox=Bbox(x=0.42, y=0.54, w=0.16, h=0.28),
+            icon=IconSpec(library_id="route", tint_role="primary"),
+        ))
+    if claim_id:
+        kind_map = {"truncation": BindingKind.CLAIM_QUOTE, "inflection": BindingKind.CLAIM_QUOTE, "generalization": BindingKind.CLAIM_PARAPHRASE}
+        # verbatim fallback = untransformed quote, never falsely labeled truncation
+        transform_value = None if transform in {"non_claim", "verbatim"} else transform
+        bindings.append(TextBinding(path="title", kind=kind_map.get(transform, BindingKind.CLAIM_QUOTE), claim_id=claim_id,
+                                    transform_class=transform_value))
+
+    if "message" in {r.value for r in recipe.required_roles}:
+        message_text = (context_ask or tagline or module.purpose) if recipe.id == "cover-brand" else (tagline or module.purpose)
+        elements.append(DocElement(id="message", kind=DocElementKind.TEXT, role="message",
+                                   bbox=Bbox(x=0.15, y=0.54, w=0.7, h=0.08), text=message_text,
+                                   style=DocTextStyle(size_pt=22.0, align="center", color="#595959"),
+                                   binding_paths=["message"]))
+        bindings.append(TextBinding(path="message", kind=BindingKind.NON_CLAIM))
+
+    # Corpus content slides are title + chevron band + illustration on ONE
+    # slide (cybersummit-32/47, reqml-49). Chevrons are therefore independent
+    # of the illustration, not an alternative to it, and are built first so the
+    # illustration can position itself beneath the band it must clear.
+    if "chevrons" in ({r.value for r in recipe.required_roles} | {r.value for r in recipe.optional_roles}):
+        # one COMPLETE supporting takeaway; the diagram is the star (visual review)
+        # density-5x5: up to three takeaways, each included ONLY if it fits
+        # whole (drop-not-clip; corpus voice is short assertions, and a
+        # trailing ellipsis is the strongest machine tell).
+        pool = module.candidate_assertions[1:] or module.candidate_assertions[:1]
+        # Corpus content slides carry 3-5 SHORT chevron lines. A full claim
+        # sentence is often two clauses; sentence-level splits are still
+        # word-boundary excerpts (truncation transform).
+        sentences = [seg.strip().rstrip(".") for t_text in pool
+                     for seg in t_text.split(". ") if len(seg.strip()) >= 25]
+        extra = ([s for s in sentences if len(s) <= 150][:5]
+                 or [t for t in pool if len(t) <= 150][:4] or [pool[0]])
+        for index, text in enumerate(extra):
+            el_id = f"chevron-{index}"
+            elements.append(DocElement(
+                id=el_id, kind=DocElementKind.TEXT, role="chevrons",
+                bbox=Bbox(x=0.06, y=0.19 + index * 0.082, w=0.88, h=0.078),
+                text=f"> {_truncate_words(text, 220)}", style=_CHEVRON_STYLE,
+                binding_paths=[f"element:{el_id}"],
+                entrance=DocEntrance(effect="rise", fragment_index=index),
+            ))
+            source_claim = (module.candidate_claim_ids[0] if recipe.id == "roadmap-lanes"
+                            else module.candidate_claim_ids[min(index + 1, len(module.candidate_claim_ids) - 1)])
+            _k, _t = _classify_label(text, claim_text_map.get(source_claim, ""))
+            bindings.append(TextBinding(path=f"element:{el_id}", kind=_k,
+                                        claim_id=source_claim, transform_class=_t))
+            reveal.append(el_id)
+
+    if recipe.id == "roadmap-gates":
+        # Five-gate closure ILLUSTRATION (visual review slice 2): the claim's
+        # own list items become checkpoints on a path ending at the flag.
+        import re as _re
+
+        primary = module.candidate_assertions[0]
+        lanes = [c.strip().rstrip(".") for c in _re.split(r",| and ", primary) if 2 <= len(c.split()) <= 8][:5]
+        lanes = lanes or [primary]
+        count = len(lanes)
+        nodes = []
+        for i, lane in enumerate(lanes):
+            nodes.append(DiagramNode(
+                id=f"gate-{i}",
+                bbox=Bbox(x=0.02 + i * (0.96 / count), y=0.28, w=0.96 / count - 0.02, h=0.44),
+                icon="shield-check" if i < count - 1 else "flag",
+                label=lane[:60],
+                binding_paths=["element:diagram"],
+            ))
+        edges = [DiagramEdge(id=f"g{i}", source=f"gate-{i}", target=f"gate-{i+1}",
+                             line_style="dashed", route="dotted-path",
+                             binding_paths=["element:diagram"]) for i in range(count - 1)]
+        elements.append(DocElement(
+            id="diagram", kind=DocElementKind.DIAGRAM, role="diagram",
+            bbox=Bbox(x=0.05, y=_after_chevrons(reveal, 0.30), w=0.9, h=0.90 - _after_chevrons(reveal, 0.30)),
+            diagram=_bind_and_return(_gate_scene(nodes) or _fill_diagram_canvas(
+                DiagramGraph(recipe="pipeline", nodes=nodes, edges=edges)),
+                module.candidate_claim_ids[0], bindings, claim_text_map),
+            binding_paths=["element:diagram"],
+            entrance=DocEntrance(effect="fade"),
+        ))
+        bindings.append(TextBinding(path="element:diagram", kind=BindingKind.CLAIM_QUOTE,
+                                    claim_id=module.candidate_claim_ids[0], transform_class="truncation"))
+    if "diagram" in {r.value for r in recipe.required_roles} and recipe.id != "roadmap-gates":
+        graph = DiagramGraph.model_validate(module.diagram)
+        # #1315: render the module's actors as a multi-element SCENE — a
+        # labelled subject with smaller supporting glyphs and dotted flow —
+        # rather than a row of equally weighted ringed icons.
+        if len(graph.nodes) >= 2 and recipe.id == "one-big-diagram":
+            from .scenes import compose_scene, scene_for_module
+
+            ordered = list(graph.nodes)
+            subject = ordered[len(ordered) // 2]
+            supports = [n for n in ordered if n.id != subject.id]
+            graph = compose_scene(
+                scene_for_module(module.module),
+                subject_label=subject.label,
+                icons=[n.icon or "circle" for n in (subject, *supports)],
+                support_labels=[n.label for n in supports],
+                node_prefix="scene",
+                binding_paths=["element:diagram"],
+            )
+        graph = _bind_and_return(_fill_diagram_canvas(graph), claim_id or claim_ids[0], bindings, claim_text_map)
+        elements.append(DocElement(
+            id="diagram", kind=DocElementKind.DIAGRAM, role="diagram",
+            bbox=Bbox(x=0.06, y=_after_chevrons(reveal, 0.24), w=0.88, h=0.90 - _after_chevrons(reveal, 0.24)),
+            diagram=graph, binding_paths=["element:diagram"],
+            entrance=DocEntrance(effect="fade", fragment_index=len(reveal)) if reveal else DocEntrance(),
+        ))
+        bindings.append(TextBinding(path="element:diagram", kind=BindingKind.CLAIM_PARAPHRASE,
+                                    claim_id=claim_id or claim_ids[0], transform_class="generalization"))
+        reveal.append("diagram")
+
+    if "visual" in {r.value for r in recipe.required_roles}:
+        # Corpus ink-envelope fit: screenshots sit at moderate scale on light
+        # canvas in the house style (render-oracle finding, dark product UI).
+        elements.append(DocElement(id="visual", kind=DocElementKind.IMAGE, role="visual",
+                                   bbox=Bbox(x=0.37, y=0.27, w=0.47, h=0.42), asset_id=module.visual_asset_id))
+        elements.append(DocElement(id="visual-caption", kind=DocElementKind.TEXT, role="caption",
+                                   bbox=Bbox(x=0.3, y=0.80, w=0.66, h=0.04),
+                                   text="Prepared-host capture",
+                                   style=_CAPTION_STYLE, binding_paths=["element:visual-caption"]))
+        bindings.append(TextBinding(path="element:visual-caption", kind=BindingKind.NON_CLAIM))
+    if "callout" in {r.value for r in recipe.required_roles}:
+        # ONE complete complementary takeaway (title already carries the primary
+        # claim; visual-review rule: complete text, never clipped; budget-safe).
+        callout_index = 1 if len(module.candidate_assertions) > 1 else 0
+        callout_source = module.candidate_assertions[callout_index:callout_index + 1]
+        # cite the claim this text came from, not claim_ids[0]: the assertion at
+        # index N derives from the claim at index N (#1371 caught the mismatch)
+        callout_claim = module.candidate_claim_ids[
+            min(callout_index, len(module.candidate_claim_ids) - 1)]
+        callout_lines = "\n\n".join(f"> {_truncate_words(t, 200)}" for t in callout_source)
+        elements.append(DocElement(id="callout", kind=DocElementKind.TEXT, role="callout",
+                                   bbox=Bbox(x=0.05, y=0.20, w=0.29, h=0.62), text=callout_lines,
+                                   style=_CHEVRON_STYLE, binding_paths=["element:callout"]))
+        _k, _t = _classify_label(callout_lines, claim_text_map.get(callout_claim, ""))
+        bindings.append(TextBinding(path="element:callout", kind=_k,
+                                    claim_id=callout_claim, transform_class=_t))
+
+    badge = _MODULE_BADGES.get(module.module)
+    if badge:
+        from .document import IconSpec as _IconSpec
+
+        elements.append(DocElement(
+            id="metaphor-badge", kind=DocElementKind.ICON, role="badge",
+            bbox=Bbox(x=0.918, y=0.016, w=0.062, h=0.068),
+            icon=_IconSpec(library_id=badge, tint_role="canvas"),
+        ))
+
+    # required_qualifier (2026-08-07 review): a claim's mandatory qualifier must
+    # be VISIBLE wherever the claim is asserted — rendered as a bound footer.
+    required = [q for cid in claim_ids for q in ([qualifiers.get(cid)] if qualifiers else []) if q]
+    if required:
+        elements.append(DocElement(
+            id="qualifier", kind=DocElementKind.TEXT, role="footer",
+            bbox=Bbox(x=0.06, y=0.845, w=0.88, h=0.075),
+            text=_truncate_words(" · ".join(dict.fromkeys(required)), 260),
+            style=DocTextStyle(size_pt=HOUSE_CAPTION_PT, color="#595959"),
+            binding_paths=["footer"],
+        ))
+        bindings.append(TextBinding(path="footer", kind=BindingKind.QUALIFIER, claim_id=claim_ids[0]))
+
+    return DocSlide(
+        id=f"m-{module.module.replace('_', '-')}",
+        order=order,
+        section=module.module,
+        layout_origin=SlideLayout.FREEFORM,
+        reveal=ContentReveal.STEP if reveal else ContentReveal.STAGGER_UP,
+        intent=SlideIntent(
+            module=f"outline.{module.module}",
+            purpose=module.purpose,
+            assertion=assertion,
+            visual_thesis=visual_thesis,
+            recipe=recipe.id,
+            audience="conference",
+            density_budget_words=recipe.max_words,
+            reveal_order=reveal,
+        ),
+        elements=elements,
+        bindings=bindings,
+        claim_ids=claim_ids,
+    )
+
+
+def _interstitial(order: int, slide_id: str, archetype: str, heading: str, *, mark: bool = True) -> DocSlide:
+    """TOC / section-divider / close slides per the DESIGN_SLIDES catalog.
+
+    section-divider is Graham's second most common archetype (n=53): a huge
+    centred teal title mid-canvas with the product mark lower-right, band still
+    titled. These carry NO claims — their text is structural chrome (module
+    names, 'Open Discussion'), bound as non_claim."""
+    elements = [
+        DocElement(id="title", kind=DocElementKind.TEXT, role="title",
+                   bbox=Bbox(x=0.02, y=0.02, w=0.76, h=0.08), text=heading,
+                   style=DocTextStyle(size_pt=24.0, bold=True), binding_paths=["title"]),
+        DocElement(id="divider-heading", kind=DocElementKind.TEXT, role="message",
+                   bbox=Bbox(x=0.08, y=0.34, w=0.84, h=0.24), text=heading,
+                   style=DocTextStyle(size_pt=54.0, bold=False, align="center", color="#065E7C"),
+                   binding_paths=["message"]),
+    ]
+    if mark:
+        elements.append(DocElement(id="divider-mark", kind=DocElementKind.IMAGE, role="badge",
+                                   bbox=Bbox(x=0.72, y=0.54, w=0.2, h=0.34),
+                                   asset_id="sparta-helmet-mark-png"))
+    return DocSlide(
+        id=slide_id, order=order, layout_origin=SlideLayout.FREEFORM,
+        elements=elements,
+        bindings=[TextBinding(path="title", kind=BindingKind.NON_CLAIM),
+                  TextBinding(path="message", kind=BindingKind.NON_CLAIM)],
+        notes=f"{archetype} interstitial (DESIGN_SLIDES archetype)")
+
+
+def _toc_slide(order: int, section_names: list[str]) -> DocSlide:
+    lines = "\n".join(f"{i}.  {name}" for i, name in enumerate(section_names, 1))
+    return DocSlide(
+        id="m-toc", order=order, layout_origin=SlideLayout.FREEFORM,
+        elements=[
+            DocElement(id="title", kind=DocElementKind.TEXT, role="title",
+                       bbox=Bbox(x=0.02, y=0.02, w=0.76, h=0.08), text="Table of Contents",
+                       style=DocTextStyle(size_pt=24.0, bold=True), binding_paths=["title"]),
+            DocElement(id="toc-list", kind=DocElementKind.TEXT, role="message",
+                       bbox=Bbox(x=0.08, y=0.2, w=0.5, h=0.6), text=lines,
+                       style=DocTextStyle(size_pt=20.0), binding_paths=["message"]),
+            DocElement(id="toc-mark", kind=DocElementKind.IMAGE, role="badge",
+                       bbox=Bbox(x=0.64, y=0.28, w=0.24, h=0.42),
+                       asset_id="sparta-helmet-mark-png"),
+        ],
+        bindings=[TextBinding(path="title", kind=BindingKind.NON_CLAIM),
+                  TextBinding(path="message", kind=BindingKind.NON_CLAIM)],
+        notes="toc archetype")
+
+
+def _proof_slide_for_asset(order: int, asset, claim_id: str, claim_text: str,
+                           qualifiers: dict, siblings: list | None = None,
+                           title_text: str | None = None) -> DocSlide:
+    """One proof slide PER real screenshot (mixed Q&A/proof archetype): the
+    working surfaces each get their own evidence page instead of one crowded
+    slide. Caption = the asset's own alt text (chrome); the takeaway binds to
+    the working-surfaces claim."""
+    kind, transform = _classify_label(asset.alt_text or "", claim_text)
+    elements = [
+        DocElement(id="title", kind=DocElementKind.TEXT, role="title",
+                   bbox=Bbox(x=0.02, y=0.02, w=0.76, h=0.08),
+                   text=" ".join((title_text or (asset.alt_text or asset.id).split(" showing")[0])[:60].split(" ")[:-1]) or (asset.alt_text or asset.id)[:60],
+                   style=DocTextStyle(size_pt=24.0, bold=True), binding_paths=["title"]),
+        DocElement(id="visual", kind=DocElementKind.IMAGE, role="visual",
+                   bbox=Bbox(x=0.3, y=0.16, w=0.66, h=0.44), asset_id=asset.id),
+        DocElement(id="callout", kind=DocElementKind.TEXT, role="callout",
+                   bbox=Bbox(x=0.03, y=0.18, w=0.25, h=0.6),
+                   text=f"> {_truncate_words(claim_text, 200)}",
+                   style=_CHEVRON_STYLE, binding_paths=["element:callout"]),
+        DocElement(id="visual-caption", kind=DocElementKind.TEXT, role="caption",
+                   bbox=Bbox(x=0.3, y=0.83, w=0.66, h=0.05),
+                   text=(asset.alt_text or "")[:120], style=_CAPTION_STYLE,
+                   binding_paths=["element:visual-caption"]),
+    ]
+    bindings = [
+        TextBinding(path="title", kind=BindingKind.NON_CLAIM),
+        TextBinding(path="element:callout", kind=BindingKind.CLAIM_QUOTE,
+                    claim_id=claim_id, transform_class="truncation"),
+        TextBinding(path="element:visual-caption", kind=BindingKind.NON_CLAIM),
+    ]
+    qualifier = qualifiers.get(claim_id)
+    if qualifier:
+        elements.append(DocElement(id="qualifier", kind=DocElementKind.TEXT, role="footer",
+                                   bbox=Bbox(x=0.06, y=0.845, w=0.88, h=0.075),
+                                   text=_truncate_words(qualifier, 260),
+                                   style=DocTextStyle(size_pt=12.0, color="#595959"),
+                                   binding_paths=["footer"]))
+        bindings.append(TextBinding(path="footer", kind=BindingKind.QUALIFIER, claim_id=claim_id))
+    for t_index, sib in enumerate((siblings or [])[:2]):
+        elements.append(DocElement(id=f"thumb-{t_index}", kind=DocElementKind.IMAGE, role="visual",
+                                   bbox=Bbox(x=0.3 + t_index * 0.34, y=0.62, w=0.32, h=0.17),
+                                   asset_id=sib.id))
+    return DocSlide(id=f"m-proof-{asset.id.replace('sparta-','')}", order=order, section="proof",
+                    layout_origin=SlideLayout.FREEFORM, elements=elements, bindings=bindings,
+                    claim_ids=[claim_id], notes="proof archetype (one surface per page)")
+
+
+def _claims_bullets_slide(slide_id: str, order: int, heading: str,
+                          picked: list, qualifiers: dict,
+                          visual_asset_id: str | None = None) -> DocSlide:
+    """bullets archetype: chevron takeaways, each the claim's own words."""
+    elements = [DocElement(id="title", kind=DocElementKind.TEXT, role="title",
+                           bbox=Bbox(x=0.02, y=0.02, w=0.76, h=0.08), text=heading,
+                           style=DocTextStyle(size_pt=24.0, bold=True), binding_paths=["title"])]
+    bindings = [TextBinding(path="title", kind=BindingKind.NON_CLAIM)]
+    for index, claim in enumerate(picked):
+        el_id = f"chevron-{index}"
+        elements.append(DocElement(id=el_id, kind=DocElementKind.TEXT, role="chevrons",
+                                   bbox=Bbox(x=0.06, y=0.17 + index * 0.14, w=0.88, h=0.13),
+                                   text=f"> {_truncate_words(claim.text, 220)}",
+                                   style=_CHEVRON_STYLE, binding_paths=[f"element:{el_id}"]))
+        bindings.append(TextBinding(path=f"element:{el_id}", kind=BindingKind.CLAIM_QUOTE,
+                                    claim_id=claim.id, transform_class="truncation"))
+    if visual_asset_id:
+        # bullets archetype: chevrons left, one large supporting visual right,
+        # drawn scene art filling the lower-left (DESIGN_SLIDES law 1)
+        for el in elements[1:]:
+            el.bbox = Bbox(x=el.bbox.x, y=el.bbox.y, w=0.44, h=el.bbox.h)
+        elements.append(DocElement(id="visual", kind=DocElementKind.IMAGE, role="visual",
+                                   bbox=Bbox(x=0.5, y=0.18, w=0.46, h=0.5),
+                                   asset_id=visual_asset_id))
+
+    quals = [qualifiers[c.id] for c in picked if c.id in qualifiers]
+    if quals:
+        elements.append(DocElement(id="qualifier", kind=DocElementKind.TEXT, role="footer",
+                                   bbox=Bbox(x=0.06, y=0.845, w=0.88, h=0.075),
+                                   text=_truncate_words(" · ".join(dict.fromkeys(quals)), 260),
+                                   style=DocTextStyle(size_pt=12.0, color="#595959"),
+                                   binding_paths=["footer"]))
+        bindings.append(TextBinding(path="footer", kind=BindingKind.QUALIFIER, claim_id=picked[0].id))
+    return DocSlide(id=slide_id, order=order, layout_origin=SlideLayout.FREEFORM,
+                    elements=elements, bindings=bindings,
+                    claim_ids=[c.id for c in picked], notes="bullets archetype (claim coverage)")
+
+def materialize_outline(
+    outline: NarrativeOutline,
+    context: DeckContext,
+    ledger: ClaimLedger,
+    sources: SourceManifest,
+    assets: AssetManifest,
+    *,
+    revision: int = 0,
+    use_candidate_renderings: bool = False,
+) -> DeckDocument:
+    if use_candidate_renderings:
+        # PREVIEW ONLY: candidates + possibly-unapproved outline; the document
+        # is provenance-stamped and the publish path must refuse it.
+        pass
+    else:
+        outline.assert_approved(ledger)
+    active = [m for m in outline.modules if not m.omitted]
+    recipes = load_recipes()
+    title = _deck_title(context)
+    tagline = context.objective.split("—")[-1].strip() if "—" in context.objective else context.primary_ask
+    qualifiers = {c.id: c.required_qualifier for c in ledger.claims if getattr(c, "required_qualifier", None)}
+    claim_text_map = {c.id: c.text for c in ledger.claims}
+    # Graham-shaped arc (DESIGN_SLIDES archetypes): cover, toc, thesis,
+    # dividers per section, module slides, one proof page PER screenshot,
+    # roadmap, close. Interstitials are structural chrome; everything else
+    # stays claim-bound.
+    sections = [("The Problem", ["problem_solution"]),
+                ("How It Works", ["architecture", "value_prop"]),
+                ("Proof in the Product", ["proof"]),
+                ("Where This Goes", ["roadmap"])]
+    by_name = {m.module: m for m in active}
+    slides: list[DocSlide] = []
+    order = 1
+
+    available_assets = {a.id for a in assets.assets}
+    _required_art = {"crop-evidence-gates", "sparta-response-flow",
+                     "sparta-embry-os-foundation", "sparta-helmet-mark-png"}
+    _missing_art = sorted(_required_art - available_assets)
+    if _missing_art:
+        # #1384: a cold bundle without approved art must stop honestly — never
+        # emit a filler visual, and never pass a style gate without the art.
+        raise ValueError(f"NEEDS_APPROVED_ART: the house arc requires approved art assets "
+                         f"absent from this bundle: {_missing_art}. Approve art via the asset "
+                         f"registry or run the artifact-mode eval on a bundle that carries it.")
+    scene_art = {"m-problem-solution": "crop-evidence-gates",  # the NOT_READY gates panel IS the problem story
+                 "m-value-prop": "sparta-embry-os-foundation",
+                 "m-architecture": "sparta-response-flow"}
+
+    def add(slide):  # noqa: ANN001
+        nonlocal order
+        # Principal drawn-scene art (DESIGN_SLIDES law 1: the illustration zone
+        # is FULL): squeeze any vector diagram right, scene art takes the left.
+        if slide.id == "m-thesis":
+            slide = slide.model_copy(update={
+                "elements": [e for e in slide.elements if e.id != "metaphor"] + [DocElement(
+                    id="thesis-mark", kind=DocElementKind.IMAGE, role="badge",
+                    bbox=Bbox(x=0.74, y=0.56, w=0.16, h=0.28),
+                    asset_id="sparta-helmet-mark-png")]})
+        if slide.order == 1 and not any(
+                e.kind is DocElementKind.IMAGE and e.id == "cover-mark" for e in slide.elements):
+            slide.elements = slide.elements + [DocElement(
+                id="cover-mark", kind=DocElementKind.IMAGE, role="badge",
+                bbox=Bbox(x=0.78, y=0.58, w=0.16, h=0.3), asset_id="sparta-helmet-mark-png")]
+        art = scene_art.get(slide.id)
+        if art and not any(e.kind is DocElementKind.IMAGE and e.role == "visual" for e in slide.elements):
+            # The drawn scene IS the illustration; a squeezed vector diagram
+            # beside it renders as clutter. Scene takes the full zone (law 1).
+            # One model_copy: per-field assignment re-validates against the OLD
+            # recipe and refuses the transitional state.
+            new_elements = [e for e in slide.elements if e.kind is not DocElementKind.DIAGRAM] + [
+                DocElement(id="scene-art", kind=DocElementKind.IMAGE, role="visual",
+                           bbox=Bbox(x=0.14, y=0.4, w=0.72, h=0.5), asset_id=art)]
+            has_chevrons = any(e.role == "chevrons" for e in new_elements)
+            slide = slide.model_copy(update={
+                "elements": new_elements,
+                "bindings": [b for b in slide.bindings if b.path != "element:diagram"],
+                "intent": slide.intent.model_copy(update={
+                    "recipe": "assertion-chevrons-scene" if has_chevrons else "statement-thesis",
+                    "reveal_order": [r for r in slide.intent.reveal_order if r != "diagram"],
+                }) if slide.intent is not None else None})
+        # Real bands carry a small top-right glyph; stamp the mini-mark.
+        if not any(e.kind is DocElementKind.IMAGE and e.id == "band-mark" for e in slide.elements):
+            slide.elements = slide.elements + [DocElement(
+                id="band-mark", kind=DocElementKind.IMAGE, role="badge",
+                bbox=Bbox(x=0.925, y=0.015, w=0.05, h=0.085), asset_id="sparta-helmet-mark-png")]
+        # Every corpus page carries an authored bottom-left identity mark (a
+        # logo row of pictures, 262/263 slides) — stamp it on every slide.
+        if not any(e.kind is DocElementKind.IMAGE and e.id == "house-mark" for e in slide.elements):
+            slide.elements = slide.elements + [DocElement(
+                id="house-mark", kind=DocElementKind.IMAGE, role="badge",
+                bbox=Bbox(x=0.02, y=0.875, w=0.05, h=0.09), asset_id="sparta-helmet-mark-png")]
+        slides.append(slide); order += 1
+
+    if "cover" in by_name:
+        add(_materialize_slide(by_name["cover"], order, recipes, title, tagline,
+                               use_candidate_renderings=use_candidate_renderings,
+                               qualifiers=qualifiers, claim_text_map=claim_text_map,
+                               context_ask=context.desired_action))
+    add(_toc_slide(order, [name for name, _ in sections]))
+    if "thesis" in by_name:
+        add(_materialize_slide(by_name["thesis"], order, recipes, title, tagline,
+                               use_candidate_renderings=use_candidate_renderings,
+                               qualifiers=qualifiers, claim_text_map=claim_text_map,
+                               context_ask=context.desired_action))
+    proof_assets = [a for a in assets.assets if getattr(a, "kind", "") == "screenshot"
+                    and a.id not in {"sparta-rd0003-candidate"}]
+    surfaces_claim = next((c for c in ledger.claims if "working-surfaces" in c.id), None)
+    claims_by_id_local = {c.id: c for c in ledger.claims}
+    extra_content = [
+        ("How It Works", "m-embry", "Built on Embry OS",
+         ["sparta-public-embry-foundation"], "sparta-embry-os-foundation"),
+        ("How It Works", "m-ask", "What You Can Ask",
+         ["sparta-public-three-questions", "sparta-public-f36-demo"], "sparta-chat-console"),
+        ("Proof in the Product", "m-rd0003", "Visibility Is Not Compliance Credit",
+         ["sparta-public-working-surfaces"], "sparta-rd0003-candidate"),
+        ("Where This Goes", "m-partners", "Where It Runs, Who It Is For",
+         ["sparta-public-collaboration-stage"], "sparta-global-posture"),
+    ]
+    for section_name, module_names in sections:
+        add(_interstitial(order, f"m-div-{section_name.lower().replace(' ', '-')}",
+                          "section-divider", section_name))
+        for module_name in module_names:
+            if module_name == "proof" and surfaces_claim is not None and proof_assets:
+                # The PRODUCT interface is the hero (operator, 2026-08-12):
+                # the threat-matrix page shows the legible technique-column
+                # crop as its primary with the console + full UI beneath.
+                asset_by_id = {a.id: a for a in assets.assets}
+                crop_layout = {"sparta-threat-matrix": ("crop-threat-matrix-techniques",
+                                                          ["crop-threat-console-cwe", "sparta-threat-matrix"])}
+                primaries = proof_assets[:2]
+                rest = proof_assets[2:]
+                for a_index, asset in enumerate(primaries):
+                    override = crop_layout.get(asset.id)
+                    if override and override[0] in asset_by_id:
+                        primary = asset_by_id[override[0]]
+                        sibs = [asset_by_id[i] for i in override[1] if i in asset_by_id]
+                    else:
+                        primary = asset
+                        sibs = rest[a_index * 2:a_index * 2 + 2] or [a for a in proof_assets if a.id != asset.id][:2]
+                    add(_proof_slide_for_asset(order, primary, surfaces_claim.id,
+                                               surfaces_claim.text, qualifiers, siblings=sibs,
+                                               title_text=(asset.alt_text or asset.id).split(" showing")[0]))
+                continue
+            if module_name in by_name:
+                add(_materialize_slide(by_name[module_name], order, recipes, title, tagline,
+                                       use_candidate_renderings=use_candidate_renderings,
+                                       qualifiers=qualifiers, claim_text_map=claim_text_map,
+                                       context_ask=context.desired_action))
+        for owner, sid, heading, wanted, visual in extra_content:
+            if owner != section_name:
+                continue
+            picked = [claims_by_id_local[c] for c in wanted if c in claims_by_id_local]
+            if picked:
+                slide = _claims_bullets_slide(sid, order, heading, picked, qualifiers,
+                                              visual_asset_id=visual)
+                # 3) no architecturally orphaned slides: every content slide
+                #    declares the section it serves (reviewer finding 2)
+                add(slide.model_copy(update={"section": section_name}))
+    add(_interstitial(order, "m-close", "close", "Open Discussion", mark=True))
+    return DeckDocument(
+        deck=DeckMeta(
+            id=f"outline-{outline.context_sha256[:8]}",
+            title=_deck_title(context),
+            audience=", ".join(context.audience_roles),
+            visibility=context.visibility,
+            source_policy=DeckSourcePolicy.PUBLIC_ONLY if context.visibility is Visibility.PUBLIC else DeckSourcePolicy.PUBLIC_AND_PRIVATE,
+        ),
+        sources=sources.sources,
+        claims=ledger.claims,
+        assets=assets.assets,
+        slides=slides,
+        revision=revision,
+        provenance={
+            "kind": "materialized-outline",
+            **({"preview_unapproved_renderings": "true"} if use_candidate_renderings else {}),
+            "outline_sha256": outline.content_hash(),
+            "context_sha256": outline.context_sha256,
+        },
+    )
+
+
+def _deck_title(context: DeckContext) -> str:
+    return context.objective.split(".")[0][:100]
+
+
+def _truncate_words(text: str, limit: int) -> str:
+    """Word-boundary truncation — a truncation transform must never cut mid-word."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",;:—-")
+    return f"{cut}…"

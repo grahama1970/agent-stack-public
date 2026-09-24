@@ -1,0 +1,370 @@
+---
+name: project-state
+description: >
+  Project state and readiness reporting in one command for arbitrary project
+  checkouts, Embry-style project checkouts, and cleanup tails. Runs infrastructure metrics, /memory
+  recall, doc-code drift, best-practices audit, current external research
+  via /brave-search and /github-search, ingest-code cleanup evidence checks,
+  project-knowledge/memory sync checks, gap analysis, and post-cleanup
+  readiness receipts.
+triggers:
+  - "project state"
+  - "project status"
+  - "system state"
+  - "full status"
+  - "comprehensive status"
+  - "embry status"
+  - "cleanup tail state"
+  - "post cleanup state"
+  - "project readiness report"
+metadata:
+  short-description: Project state and readiness reporting
+allowed-tools:
+  - Bash
+  - Read
+  - Glob
+  - Grep
+provides:
+  - project-state-report
+  - readiness-report
+  - cleanup-tail-state
+composes:
+  - service-status
+  - data-audit
+  - memory
+  - ingest-code
+  - project-knowledge
+  - assistant
+  - brave-search
+  - github-search
+  - create-figure
+  - task-monitor
+  - checkpoint
+  - agentic-evals
+  - project-watchdog
+  - triage-error
+complies:
+  - best-practices-skills
+  - best-practices-python
+runtime_self_improvement: basic
+taxonomy:
+  - assessment
+  - monitoring
+  - operations
+  - validation
+disciplines:
+  - observability-operations
+  - evaluation-quality
+---
+
+> STOP. READ THIS ENTIRE SKILL.MD BEFORE CALLING ANY ENDPOINT.
+
+# /project-state
+
+Project state and readiness reporting for arbitrary project checkouts. Embry
+OS cascade and daemon sections are reported only when the target checkout has
+Embry-style structure such as `embry.yaml`.
+
+This skill is a reporter and readiness receipt generator. It does not delete
+files, move files, rewrite code, authorize cleanup removals, or turn skipped
+checks into success.
+
+## Modes
+
+| Mode | Flag | Phases | Time |
+|------|------|--------|------|
+| **Quick** | `--quick` | Phase 1 only | ~10s |
+| **Standard** | (default) | Phases 1-4 + 6 | ~30s |
+| **Full** | `--full` | All 6 phases, including Brave/GitHub/ArXiv research | ~2min |
+| **Cached** | `--cached` | Return cached checkpoint if < 1 hour old, otherwise run live and save | ~1s (hit) / ~30s (miss) |
+| **Force** | `--force` | Always run live, save checkpoint after | ~30s |
+| **Cleanup Tail** | `report --cleanup-tail` | Load a cleanup receipt, run a bounded post-cleanup state snapshot, write readiness artifacts | ~30s |
+| **Config Doctor** | `config doctor` | Check non-secret config without prompting | ~1s |
+
+## Usage
+
+```bash
+# Standard report (infrastructure + memory + drift + best practices + gaps)
+./run.sh report
+
+# Report on an explicit checkout
+PROJECT_STATE_ROOT=/path/to/project ./run.sh report --json
+
+# Quick infrastructure-only report
+./run.sh report --quick
+
+# Full report including current Brave/GitHub/ArXiv landscape
+./run.sh report --full
+
+# JSON for automation / piping to /create-figure
+./run.sh report --json
+
+# Write to file
+./run.sh report --output state.md
+./run.sh report --json --output state.json
+
+# Use cached result if available and < 1 hour old
+./run.sh report --cached
+
+# Force live run and save checkpoint for next --cached call
+./run.sh report --force
+
+# Combine with other flags
+./run.sh report --cached --json --output state.json
+./run.sh report --force --quick
+
+# Post-cleanup readiness receipt; never deletes or moves files
+./run.sh report --cleanup-tail \
+  --cleanup-receipt artifacts/cleanup/<run-id>/receipt.json \
+  --json --output artifacts/cleanup/project_state_after.json
+
+# Write readiness artifacts to an explicit directory
+./run.sh cleanup-tail --cleanup-receipt artifacts/cleanup/<run-id>/receipt.json \
+  --output-dir artifacts/project-state/readiness/<run-id> --json
+
+# Emit or validate pydantic-backed report contracts
+./run.sh schema project_state.report.v1
+./run.sh validate-report state.json
+./run.sh repair-report bad-state.json --output repaired-state.json
+./run.sh render-report state.json --output state.md
+
+# Non-interactive configuration check
+./run.sh config doctor --json
+
+# One clean-room multi-web review round; project-watchdog owns forced iteration after actionable tickets are filed
+./run.sh clean-room skills/ask --output-dir /tmp/clean-room-ask --watchdog-project agent-skills
+```
+
+## Clean-room multi-web loop boundary
+
+`clean-room` is intentionally one deterministic round, not an agentic prose loop.
+It writes a source-first bundle/receipt, prepares the `$ask tau-dag` roundtable
+command for `webgpt`, `webkimi`, and `webgemini` by default, parses an optional
+review response, and exits:
+
+- `0` only for exact `CLASSIFICATION: ready-to-deploy` with preserved tab id and conversation URL
+- `2` for `not-ready`, malformed output, missing same-tab binding, or waiting for browser review
+
+Incomplete-evidence responses fix the bundle first and do not emit tickets. Concrete
+not-ready implementation findings become focused `$ticket` preview commands. Once a
+ticket is filed with `--apply`, `$project-watchdog` is the forced-iteration system:
+it leases the routable issue, dispatches one bounded repair tick, requires local
+proof, audits closure, and reopens or continues from receipts. Web seats remain
+advisory; they do not implement or verify code.
+
+Boundary failures carry a `$triage-error` classification in the receipt and ticket
+preview metadata. Use the triage code to replace generic `not-ready`/`NEEDS_ATTENTION`
+labels with a canonical `{code, cause, next_command}` before filing or routing
+follow-up work.
+
+## Readiness Report Contract
+
+`cleanup-tail` writes a best-practices-skills-compatible readiness bundle:
+
+```text
+artifacts/project-state/readiness/<run-id>/
+  report.json
+  report.md
+  index.html
+```
+
+`report.json` is the source of truth. The HTML page is only a view. The report
+uses a pydantic-validated JSON contract: schema `skill.readiness_report.v1`,
+profile `cleanup-tail`, explicit feature rows, case rows, `needs_attention`, and
+source receipt paths.
+
+Release readiness is always `NOT_ESTABLISHED` for cleanup-tail because it is a
+state/gap receipt, not project acceptance. If the cleanup receipt shows
+moved/quarantined/manual-review items, the report marks `needs_attention` and
+the safe default is to keep `.cleanup` intact until usage evidence is reviewed.
+
+Cleanup-tail reports:
+
+- repo dirty state after cleanup from `git status --porcelain`
+- optional project-native sanity result from `--project-sanity-cmd`
+- moved/kept/deleted/review-required path counts from the cleanup receipt
+- `.cleanup-evidence.json` coverage from `$ingest-code` Phase 0 for source-like
+  candidates; this narrows reference context but never authorizes mutation
+- `.ingest-code.json` normalized marker status; this is local command evidence,
+  not proof of backend embedding or Qdrant coverage
+- best-practices commands recorded in the receipt or passed via
+  `--best-practices-check`
+- doc-code drift when the standard cleanup-tail profile runs
+- stale/deprecated document findings surfaced through doc-code drift
+- project knowledge file presence plus receipt-declared project-knowledge and
+  memory sync status as explicit evidence gaps
+- potential new gaps introduced by cleanup
+- unresolved cleanup candidates
+
+Cleanup-tail must not run broad Memory scans. Memory answers what was already
+stored; local files such as `.cleanup-evidence.json`, `.ingest-code.json`,
+`PROJECT_KNOWLEDGE.md`, and git status answer what exists in the worktree now.
+When receipt fields do not record `project_knowledge_sync` or `memory_sync`,
+the report must mark those rows `not_established`.
+
+## Configuration
+
+`./run.sh config doctor --json` is CI-safe and never prompts. Missing paths are
+reported as `needs_attention` with a safe default. Use environment variables,
+not hardcoded paths, when adapting this skill:
+
+```bash
+PROJECT_STATE_ROOT=/path/to/project
+PROJECT_STATE_NAME=project-name
+PI_SKILLS_ROOT=/path/to/skills
+
+# Legacy Embry alias, still accepted for existing callers:
+EMBRY_OS_ROOT=/path/to/project
+```
+
+## What It Reports
+
+### Phase 1: Infrastructure (always runs)
+
+| Section | Source | Data |
+|---------|--------|------|
+| **Daemons** | Unix socket health checks | Status of Embry services when target is Embry-style; otherwise not applicable |
+| **Tests** | pytest --collect-only over `tests/`, `services/tests/`, or `test/` | Total count |
+| **Cascade** | model_registry.json + shadow.jsonl | Tier status, trained models, shadow entries when target is Embry-style; otherwise not applicable |
+| **Training Pipeline** | ~/.pi/assistant/training_data/ | Labels per task, classifiers on disk |
+| **Skills** | target `.skills/skills`, target `skills/`, or configured skills root | Total count, SKILL.md/sanity.sh compliance |
+| **Frontend** | `frontend/`, `apps/embry-ui/`, or `prototypes/tabbed/html/` | TSX component count, Rust file count |
+| **Deploy** | `services/systemd/`, Containerfile, compose files | Deployment artifact counts |
+| **Cascade Wiring** | services/*-daemon/main.py | Which daemons have cascade integration when target is Embry-style |
+
+### Phase 2: Memory Recall (standard + full)
+
+Queries `/memory recall` for known features, competitive advantages, and known gaps.
+
+### Phase 3: Doc-Code Drift (standard + full)
+
+Scans docs for aspirational language (will, TODO, FIXME, planned, future, not yet) and stale file references.
+
+### Phase 4: Best Practices (standard + full)
+
+Scans for anti-patterns:
+- **Python**: hardcoded secrets, bare except, hardcoded paths, print vs logger
+- **React**: console.log, `:any` types
+- **Skills**: missing YAML frontmatter, missing `provides` field
+
+### Phase 5: Competitive Landscape (--full only)
+
+Uses current retrieval lanes first: `/brave-search` for web results and
+`/github-search` for repositories/issues. `/dogpile` is treated as a legacy
+deep aggregator and should be used only when explicitly requested or when a
+single broad multi-source research bundle is more important than freshness.
+
+### Phase 6: Gap Analysis (always runs)
+
+Synthesizes all previous phases into prioritized, actionable gaps with severity (critical/high/medium/low) and recommended actions.
+
+## Project Knowledge
+
+Current-state notes for this skill live in `docs/PROJECT_KNOWLEDGE.md`. Treat
+that document as context, not proof. Readiness claims still require the
+machine-readable report and command receipts.
+
+## Ecosystem
+
+`$project-state` is a reporting component in the agent-governance ecosystem. It
+produces pydantic-validated `project_state.report.v1`,
+`skill.readiness_report.v1`, and `project_state.config_doctor.v1` JSON payloads.
+`./run.sh schema <schema>` emits the JSON Schema; `./run.sh validate-report
+<report.json>` validates a saved report and routes validation failures through
+`$triage-error`; `./run.sh repair-report <bad.json> --output <repaired.json>`
+self-heals invalid project-state JSON into a valid repair skeleton with a Phase
+6 critical gap and the `$triage-error` classification embedded;
+`./run.sh render-report <report.json> --output <report.md>` renders a saved
+pydantic-valid JSON report as Markdown. Human prose/HTML is generated only from
+those JSON payloads. It consumes local worktree evidence, Memory recall
+observations, optional cleanup receipts, and optional current research receipts.
+
+Per `$agent-ecosystem`, Memory recall output remains an observation and is not
+wrapped. Standard/quick/full reports are state payloads, not acceptance or
+closure receipts. Cleanup-tail readiness reports are durable state receipts;
+when another component uses one for dispatch, handoff, acceptance, escalation,
+closure, or durable failure, that boundary component wraps it in
+`pi.receipt_envelope.v1` and resolves parent references.
+
+## Cleanup Sequence Fit
+
+Use cleanup-tail at the end of this sequence:
+
+1. `cleanup --worktree-audit`
+2. `cleanup --plan`
+3. `$ingest-code scan <repo> --cleanup-evidence` when tracked/source-like
+   candidates exist
+4. project-native sanity baseline
+5. execute only authorized cleanup actions
+6. rerun project-native sanity and relevant `best-practices-*`
+7. `project-state report --cleanup-tail --cleanup-receipt ... --json --output artifacts/cleanup/project_state_after.json`
+8. update `$project-knowledge` and `$memory` with accepted lessons
+
+The cleanup-tail report answers what still looks unhealthy, stale, drifted, or
+inconsistent. It does not answer whether a file is safe to delete.
+
+## Visualization
+
+After generating a report (especially with `--json`), offer to visualize key findings via `/create-figure`:
+
+```bash
+# Architecture diagram from project structure
+create-figure architecture --project ./state.json --output arch.svg
+
+# Gap severity distribution
+create-figure metrics --input state.json --output gaps.png --type pie --title "Gap Severity"
+
+# Skill health heatmap
+create-figure heatmap --input state.json --output skill-health.png
+
+# Full figure set from assess-compatible JSON
+create-figure from-assess --input state.json --output-dir ./figures/
+```
+
+**When to offer:** After presenting the report, ask: "Want me to visualize any of these findings?"
+
+## Common Mistakes
+
+### WRONG: Running --full mode for a quick health check
+```bash
+./run.sh report --full  # takes ~2min, includes Brave/GitHub/ArXiv external research
+```
+
+### RIGHT: Use --quick for fast checks, --cached for repeated queries
+```bash
+./run.sh report --quick   # ~10s, infrastructure only
+./run.sh report --cached  # ~1s if cached within the hour
+```
+
+### WRONG: Not using --json when piping to other skills
+```bash
+./run.sh report > state.md  # markdown, not parseable by /create-figure
+```
+
+### RIGHT: Use --json for automation and visualization
+```bash
+./run.sh report --json --output state.json
+create-figure from-assess --input state.json --output-dir ./figures/
+```
+
+### WRONG: Ignoring gap analysis (Phase 6) and only reading infrastructure
+```bash
+./run.sh report --quick  # misses doc-code drift, best practices violations, gaps
+```
+
+### RIGHT: Standard mode includes all critical phases
+```bash
+./run.sh report  # phases 1-4 + 6: infrastructure + memory + drift + practices + gaps
+```
+
+### WRONG: Treating cleanup-tail as cleanup authority
+```bash
+./run.sh report --cleanup-tail --cleanup-receipt artifacts/cleanup/run/receipt.json
+# then delete .cleanup because the command exited zero
+```
+
+### RIGHT: Treat cleanup-tail as a state receipt only
+```bash
+./run.sh report --cleanup-tail --cleanup-receipt artifacts/cleanup/run/receipt.json --json
+# inspect needs_attention and usage evidence before any cleanup deletion
+```

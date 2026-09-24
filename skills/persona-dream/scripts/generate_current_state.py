@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Generate CURRENT_STATE.md from accepted receipts — never from prose.
+
+The three external reviews all flagged the same defect: README/GOAL/HANDOFF are
+supersession stacks a reader must replay top-to-bottom to find current truth.
+This generator reads the authority receipts and emits one current-truth page.
+Run with --check to fail (exit 1) when the committed CURRENT_STATE.md drifts
+from the receipts; wire that command into agentic-evals when it is readiness-relevant.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+SKILL = Path(__file__).resolve().parents[1]
+RR = SKILL / "reports/pipeline-complete/.persona-dream/revisions/rev_successor_943b01ecd9a3"
+OUT = SKILL / "CURRENT_STATE.md"
+
+RECEIPTS = {
+    "active_pointer": SKILL / "reports/pipeline-complete/.persona-dream/state/active_revision.json",
+    "rung": RR / "acceptance_rung_receipt.v6.json",
+    "provider_return": RR
+    / "phase_11_submit_return/provider_return/97688ec5191e7246cc7d86325a7404894c459d2572bc5412b29ccd3dc755cfd4/phase11_download_ffprobe_receipt.v1.json",
+    "observation_packet": RR / "watch_gauntlet/59b9ff3155d6/dream_observation_packet.v2.json",
+    "cognitive_loop": RR / "watch_gauntlet/59b9ff3155d6/cognitive_loop_v2/lineage_receipt.v1.json",
+    "phase16": RR / "phase_16_behavior_evaluation/phase16_behavior_evaluation_receipt.v1.json",
+    "pilot_protocol": SKILL / "contracts/pilot_c_vs_f_frozen_protocol.v3.md",
+    "voice_expression": RR / "voice_expression/voice_expression_evaluation_receipt.v1.json",
+    "live_chain": SKILL / "reports/goal_v5/continuity/live_chain/RECEIPT.json",
+    "session_arc_bias": SKILL / "reports/goal_v5/continuity/session_arc_bias/RECEIPT.json",
+    "sparta_arc_bias_consumption": SKILL
+    / "reports/goal_v5/continuity/sparta_arc_bias_consumption/RECEIPT.json",
+    "reliability": SKILL / "reports/goal_v5/continuity/reliability/AGGREGATE_RECEIPT.json",
+}
+
+
+def _load(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def render() -> str:
+    missing = [k for k, p in RECEIPTS.items() if not p.exists()]
+    if missing:
+        raise SystemExit(f"missing authority receipts: {missing}")
+
+    pointer = _load(RECEIPTS["active_pointer"])
+    rung = _load(RECEIPTS["rung"])
+    ret = _load(RECEIPTS["provider_return"])
+    packet = _load(RECEIPTS["observation_packet"])
+    loop = _load(RECEIPTS["cognitive_loop"])
+    p16 = _load(RECEIPTS["phase16"])
+    voice = _load(RECEIPTS["voice_expression"])
+    live_chain = _load(RECEIPTS["live_chain"])
+    arc_bias = _load(RECEIPTS["session_arc_bias"])
+    sparta_consumption = _load(RECEIPTS["sparta_arc_bias_consumption"])
+    reliability = _load(RECEIPTS["reliability"])
+
+    dur = ret.get("ffprobe", {}).get("format", {}).get("duration", "?")
+    rows = [
+        ("Active revision", pointer.get("revisionId"), "active_pointer"),
+        ("Acceptance rung", rung.get("status"), "rung"),
+        (
+            "Provider return",
+            f"{ret.get('status')} ({dur}s, {ret.get('size_bytes')}B, "
+            f"{str(ret.get('downloaded_sha256'))[:23]})",
+            "provider_return",
+        ),
+        ("Observation packet", packet.get("packet_status"), "observation_packet"),
+        (
+            "Cognitive lineage",
+            f"{loop.get('status')} bundle={loop.get('bundle_rev')} canonical_written={loop.get('canonical_written')} dream_node_untouched={loop.get('dream_node_untouched')}",
+            "cognitive_loop",
+        ),
+        ("Phase 16 evaluation", p16.get("overall_status"), "phase16"),
+        ("Pilot protocol", f"frozen sha:{_sha(RECEIPTS['pilot_protocol'])}", "pilot_protocol"),
+        (
+            "Voice expression",
+            f"text={voice.get('text_route')} audio={voice.get('audio_route')} "
+            f"lipsync={(voice.get('lipsync_canary_receipt') or {}).get('status')}",
+            "voice_expression",
+        ),
+        (
+            "Joined live chain",
+            f"{live_chain.get('status')} cycle={live_chain.get('dream_cycle_id')} "
+            f"negative_controls={sum(1 for row in live_chain.get('negative_controls', []) if row.get('status') == 'PASS_NEGATIVE_BLOCKED')}/{len(live_chain.get('negative_controls', []))}",
+            "live_chain",
+        ),
+        (
+            "Session arc bias",
+            f"{arc_bias.get('status')} negative_controls={sum(1 for row in arc_bias.get('negative_controls', []) if row.get('status') == 'PASS_NEGATIVE_BLOCKED')}/{len(arc_bias.get('negative_controls', []))}",
+            "session_arc_bias",
+        ),
+        (
+            "SPARTA arc-bias consumption",
+            f"{sparta_consumption.get('status')} "
+            f"pre_turn={sparta_consumption.get('arc_bias_applied_before_first_turn')} "
+            f"same_artifact={sparta_consumption.get('same_arc_bias_artifact_all_turns')} "
+            f"answer_text_unchanged={sparta_consumption.get('answer_text_unchanged')}",
+            "sparta_arc_bias_consumption",
+        ),
+        (
+            "Five-cycle reliability pilot",
+            f"{reliability.get('status')} passed={reliability.get('counts', {}).get('passed')}/{reliability.get('counts', {}).get('attempted')} "
+            f"wilson_lower={reliability.get('success_interval', {}).get('lower')}",
+            "reliability",
+        ),
+    ]
+
+    lines = [
+        "# CURRENT STATE (generated — do not edit)",
+        "",
+        "Generated by `scripts/generate_current_state.py` from the authority",
+        "receipts below. README/GOAL/HANDOFF narrate history; THIS file is the",
+        "current truth. Regenerate after any receipt-changing work; `--check`",
+        "runs in the test suite and fails on drift.",
+        "",
+        "| Boundary | Current state | Authority receipt |",
+        "|---|---|---|",
+    ]
+    for name, state, key in rows:
+        rel = RECEIPTS[key].relative_to(SKILL)
+        lines.append(f"| {name} | `{state}` | `{rel}` (sha:{_sha(RECEIPTS[key])}) |")
+    lines += [
+        "",
+        "Not proven (from the receipts' own does_not_prove sets): human",
+        "subjective acceptance of the dream video; perceived emotional fidelity",
+        "and lip-sync quality of the voice lane (canary proves the route only);",
+        "production reliability beyond an N=5 pilot; deployed production behavior beyond the local live SPARTA API receipt;",
+        "human-perceived effect of the session arc-bias artifact;",
+        "whole-clip embedding-certified identity.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true", help="exit 1 if CURRENT_STATE.md drifts")
+    args = ap.parse_args()
+    content = render()
+    if args.check:
+        if not OUT.exists() or OUT.read_text() != content:
+            print("CURRENT_STATE.md drifts from receipts — regenerate", file=sys.stderr)
+            return 1
+        print("CURRENT_STATE.md matches receipts")
+        return 0
+    OUT.write_text(content)
+    print(f"wrote {OUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

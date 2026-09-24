@@ -1,0 +1,18 @@
+# /extractor skill policy - enforced by local skill policy hooks where enabled.
+
+name: extractor
+slash_command: /extractor
+
+required_reads:
+  - .pi/skills/extractor/SKILL.md
+
+forbidden_use:
+  any_of:
+    - import: fitz
+      reason: "The wrapper must not implement PDF extraction. Delegate to Extractor."
+    - import: pymupdf
+      reason: "The wrapper must not implement PDF extraction. Delegate to Extractor."
+    - import: requests
+      reason: "Use httpx for HTTP in Python code; this wrapper should not need HTTP."
+    - pattern: "engine|model|provider|preset"
+      reason: "The normal wrapper surface must not expose internal routing controls."

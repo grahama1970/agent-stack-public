@@ -1,0 +1,192 @@
+# Persona Dream — evidence and proof boundary
+
+This is the audit surface for [Persona Dream](../README.md): what has been
+proven, what has not, and which receipt earns each claim. It is deliberately
+separate from the README, which is for people trying to understand what the
+project is.
+
+Machine state lives in [`../CURRENT_STATUS.json`](../CURRENT_STATUS.json), which
+is the authority; the current-state block below is generated from it.
+
+## How to read the evidence
+
+- `#1127` did what it was built to do when it detected a stimulus confound; it
+  was not a failed implementation.
+- Measurement validity is not a PCTOM benefit result.
+- The earlier listener-study stimulus confound is resolved by #1179's shared
+  normalization rerender and frozen technical screen. The listener study is now
+  blocked on #1058 human response collection plus signed interpretation.
+- Read [Current Proof Boundary](#current-proof-boundary) before interpreting any
+  reported number, and use [`CURRENT_STATUS.json`](CURRENT_STATUS.json) for the
+  current checked state.
+
+## Current state
+
+Phase **CONTINUOUS_RESEARCH_AND_TRANSFER**. Synthetic dream generation and
+emotion-conditioned Chatterbox speech are established capabilities. The active
+proof target is repeated experience -> emotion trigger -> dream consolidation
+-> durable persona-memory personality/emotion delta -> later behavior and speech
+-> new trigger evidence. Persona Dream does not reach a permanent complete
+state: bounded experiments terminate and feed the next cycle. A change is called
+an improvement only when a preregistered metric beats its baseline while safety
+gates hold. The digest below is generated from
+`CURRENT_STATUS.json`, which holds the authoritative blockers, next step, and
+every figure. `./run.sh check-current-state-consistency --strict` fails if this
+file drifts from it.
+
+### Live recall-to-trigger bridge
+
+`../local/proofs/memory-recall-emotional-triggers-20260915/agentic_eval_report.json`
+reports `READY` and capability
+`persona_dream.memory_recall_emotional_triggers=PROVEN` across three live trials
+plus three fault-injected trials. The live receipt records three persona-scoped
+`persona_memory` recalls with exact source rereads and structured
+emotion/intensity. The generated packet then passed through
+`persist-emotional-triggers`, whose retained receipt records three exact Memory
+rereads. This proves the recall-to-trigger seam, not a later durable personality
+delta or behavioral effect.
+
+| Lane | Implemented and receipted | Not proven |
+|---|---|---|
+| Continuity ledger | Atomic writes, epoch compare-and-set, cycle idempotency, identity-core guard | Runtime authority across real sessions |
+| Session mood | Deterministic mood bound before turn 1, stable across three turns, answer text preserved | Behavior beyond local live receipts |
+| Chatterbox voice | Live render at ASR WER 0.0 with durable snapshots; Embry reads her own journal aloud (#1208) | That the requested tone is audible at all — measured below the renderer's own noise floor (#1209). Perceived emotion, naturalness, human acceptance |
+| Speaker recognition | Machine separation under two named render conditions; neither value is a universal threshold | Human recognition; cross-mood identity (#1130) |
+| Joined live chain | One fresh cycle joins dream evidence through to recognition, 13/13 negative controls blocked | Perceived emotion; behavior beyond local receipts |
+| Session arc bias | Bounded deltas published under a hash-bound consumer contract, consumed live by SPARTA before turn 1 | Human-perceived emotion; deployed production behavior |
+| Reliability pilot | Five live cycles passed, zero duplicate accepted effects — a feasibility pilot | Production reliability (#1128); restart/recovery (#1129) |
+| Blinded listener study | V2 preregistration, counterbalanced raters, current rater page, stimulus validation, and #1179 technical screen PASS | 20 valid human listener rows and signed interpretation (#1058) |
+| PCTOM-R | Measurement validity passes on a non-degenerate corpus; the treatment can lose | No held-out benefit result (#1008) |
+| Historical media loop | One accepted dream persistence path and provider return | Repeatability; previous-video causality |
+
+Figures, receipt paths, and revision ids are in
+[`CURRENT_STATUS.json`](CURRENT_STATUS.json) and
+[`docs/verification.md`](docs/verification.md).
+
+
+<!-- BEGIN GENERATED CURRENT RESEARCH STATE -->
+
+*Generated from `CURRENT_STATUS.json` by `scripts/generate_readme_research_state.py`;
+run `./run.sh generate-readme-research-state`. Full claim dispositions live in
+the JSON, not here.*
+
+- **Phase:** `CONTINUOUS_RESEARCH_AND_TRANSFER`
+- **Open claims:** #1058 (Blinded listener study)
+- **Current blocker:** #1058 human listener collection remains open for human-perception wording only: 0/20 valid rows and SIGNED_INTERPRETATION.json missing; not an experi…
+- **Next step:** Continue the research-and-transfer loop: select the next falsifiable improvement experiment from persona-memory evidence.
+
+<!-- END GENERATED CURRENT RESEARCH STATE -->
+
+## Current Proof Boundary
+
+This is a research prototype. Nothing below is a product claim, and the
+vocabulary is deliberately narrow: **implemented** means code exists,
+**fixture-proven** means deterministic checks pass with no live behavior implied,
+**live slice proven** means a real external operation ran and was inspected, and
+**blocked** means a named prerequisite is missing.
+
+| Boundary | State | Where the evidence lives |
+|---|---|---|
+| Grounded dream packets | Implemented | `reports/` run receipts |
+| Image and storyboard production | Live slice proven | `reports/` panel and review receipts |
+| Phases 01-10, qualified revision | Qualified revision | [`docs/verification.md`](docs/verification.md) |
+| Phase 11, submit and return | Live return accepted at agent level; human acceptance open | [`docs/verification.md`](docs/verification.md) |
+| Phase 12, Watch observation | Live slice proven on historical return; packet degraded on successor | [`docs/verification.md`](docs/verification.md) |
+| Phases 13-15, interpretation to persistence | Live slice proven on the accepted return | [`docs/verification.md`](docs/verification.md) |
+| Phase 16, recall and later behavior | Machine-decidable slice live-proven | [`docs/verification.md`](docs/verification.md) |
+| Chatterbox voice expression | Technical screen passed for the current stimuli; human perception still unproven | `reports/goal_v5/continuity/blinded_listener_study/TECHNICAL_SCREEN_RECEIPT.json`, #1058 |
+| Readable journal artifact | Implemented and hash-bound | `reports/goal_v5/journal/JOURNAL_RENDER_RECEIPT.json` |
+| Spoken journal | Live slice proven | `reports/goal_v5/journal/JOURNAL_AUDIO_RECEIPT.json` |
+| Requested tone to measurable acoustic effect | **Disproven**: below the renderer's own stochastic spread | `reports/goal_v5/journal/TONE_EFFECT_RECEIPT.json`, #1209 |
+| Journal page | Live slice proven: rendered in Chrome at 1440x900, footnotes resolve, audio loads | `reports/goal_v5/journal_ux/BROWSER_PROOF_RECEIPT.json` |
+| Interactive dream discussion | Append-only writer live-proven; carried back into memory as attributed speech | `reports/goal_v5/conversation/CONVERSATION_APPEND_RECEIPT.json` |
+| Day events to a later dream | Live slice proven: two consecutive days produce different journals | `reports/goal_v5/day_events/DAY_BLEND_RECEIPT.json` |
+| Return arc, discussion into a later dream | Live slice proven: carried, retrieved, and recalled as attributed speech | `reports/goal_v5/closed_loop/CLOSED_LOOP_RECEIPT.json` |
+| Dreams accumulate as memory | Live slice proven: interpretation and media stored, drawn by a later dream, marked dreamt | `reports/goal_v5/accumulation/ACCUMULATION_RECEIPT.json` |
+| PCTOM-R held-out benefit | Not run | [`TRANSFER_LEDGER.md`](TRANSFER_LEDGER.md), #1008 |
+
+Revision ids, request hashes, receipt paths, and the per-phase narrative are in
+[`docs/verification.md`](docs/verification.md). Current machine state is in
+[`CURRENT_STATUS.json`](CURRENT_STATUS.json).
+
+## Next workflow steps
+
+Not in Quick Start because they are not finished. Each is one open join in the
+journal loop:
+
+| Step | Command | Blocked on |
+|---|---|---|
+| Show that dreaming *helps* | controlled ablation vs memory and reflection | the actual research question, unrun |
+
+## PCTOM-R, and why its numbers are not a result
+
+PCTOM-R asks whether counterfactual dreaming improves *prospective* Theory of
+Mind — predicting what another agent will do — beyond what direct memory gives.
+
+The machinery is strong and the receipt counts are large. Neither fact is a
+finding. Receipt volume measures the reliability of the experiment apparatus
+within its text-first scope; it does not measure benefit. Until a preregistered
+proper-scoring or planning-regret metric separates CD from the strongest M/R/D
+baseline on a held-out slice, PCTOM-R has no result to report.
+
+## What this project does not claim
+
+None of the following is proven, and no commit, single historical run, ASR word
+error rate, speaker-embedding score, or volume of receipts establishes any of
+them:
+
+- end-to-end pipeline reliability across repeated cycles;
+- deployed production behavior beyond the local live SPARTA API receipt;
+- perceived emotion, naturalness, or human acceptance of synthesized speech;
+- that a human listener recognizes Embry;
+- a confidence-bounded PCTOM-R planning advantage;
+- that attaching a previous video causally improves continuity.
+- Claims here are retired only by a named receipt read back from disk.
+
+## Ownership boundaries
+
+Persona Dream owns the dream packet, continuity ledger, session-mood binding,
+and the receipts that join them. It does **not** own: Graph Memory (persistence
+and recall), Watch (observation and adjudication), Tau (model routing and
+creator/reviewer loops), Kling and other providers (media generation),
+Chatterbox (speech synthesis), or the voice-evaluation lane (speaker backends).
+Each has its own proof boundary; Persona Dream may cite their receipts but may
+not restate their guarantees. See [Technical Architecture](#technical-architecture).
+
+---
+
+## The controlling hierarchy
+
+The immutable goal is registered with `$goal-drift` (source `human_prompt`) and
+read back with `skills/goal-drift/run.sh goal --project persona-dream`. That
+registry, not this file, is the authority.
+
+1. **Continuous research program** — determine, through preregistered,
+   falsifiable, fail-closed experiments, whether provenance-bound synthetic
+   dreaming adds measurable value over direct memory and structured reflection.
+   **A loss, tie, or null closes that experiment, not the program.** Each result
+   feeds the next candidate-change cycle.
+2. **Experimental subject** — Embry is the test case, not the objective.
+   "Build Embry" would assume the mechanism works.
+3. **Safety contract** — preserve identity, factual competence, answer content,
+   and evidence classes. These are validity constraints, never conclusions. See
+   the Persistent-Persona Safety Hypothesis in [`GOAL.md`](GOAL.md).
+4. **Transfer contract** — move validated mechanisms and failure lessons into
+   `$memory`, `$chatterbox-speak`, Tau, SPARTA, and bounded persona-memory
+   personality/emotion state. Recorded per experiment in
+   [`TRANSFER_LEDGER.md`](TRANSFER_LEDGER.md).
+5. **Product decision** — adopt, constrain, simplify, or retire each mechanism
+   on the evidence. Deletion is a goal-serving action here.
+
+**PCTOM-R** (Prospective Counterfactual Theory of Mind) is the research
+workstream under item 1: does imagining what did *not* happen improve
+predictions about what another agent *will* do? Issue #1131 tracks the
+measurement-validity repair that lets the treatment lose; that repair is not
+evidence of benefit. The held-out result is tracked by #1008. Current state is
+in [`CURRENT_STATUS.json`](CURRENT_STATUS.json).
+
+**Kling, Watch, `$memory`, `$chatterbox-speak`, persona-memory, and Tau** are
+supporting or improvement lanes. Their transfer decisions live in
+[`TRANSFER_LEDGER.md`](TRANSFER_LEDGER.md). Individual studies complete; the
+Persona Dream program continues evolving the owning systems and persona state.
+

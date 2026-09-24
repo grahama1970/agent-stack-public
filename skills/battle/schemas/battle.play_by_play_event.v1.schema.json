@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.play_by_play_event.v1",
+  "title": "Battle play-by-play event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "battle_id",
+    "round_number",
+    "sequence",
+    "occurred_at",
+    "event_type",
+    "actor",
+    "period",
+    "summary",
+    "certainty",
+    "statement_kind",
+    "evidence_refs",
+    "source_fields",
+    "facts",
+    "causal_refs",
+    "score_delta",
+    "score_after",
+    "non_claims"
+  ],
+  "properties": {
+    "schema": {"const": "battle.play_by_play_event.v1"},
+    "event_id": {"type": "string", "minLength": 1},
+    "battle_id": {"type": "string", "minLength": 1},
+    "round_number": {"type": ["integer", "null"], "minimum": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "event_type": {
+      "enum": [
+        "arena_open",
+        "authorization_checked",
+        "round_started",
+        "scan_started",
+        "scan_result_recorded",
+        "research_recorded",
+        "specimen_materialized",
+        "patch_materialized",
+        "contact_observed",
+        "kill_observed",
+        "crash_observed",
+        "containment_observed",
+        "regression_observed",
+        "judge_called",
+        "judge_verdict_recorded",
+        "score_delta_recorded",
+        "win_recorded",
+        "spawn_preflight_recorded",
+        "terminal_event_recorded",
+        "round_closed",
+        "scorekeeper_final",
+        "battle_closed"
+      ]
+    },
+    "actor": {"enum": ["arena", "authorization", "red", "blue", "judge", "scorekeeper", "lineage", "system"]},
+    "period": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "certainty": {"enum": ["observed_receipt", "verified_hash", "score_authority", "non_claim"]},
+    "statement_kind": {"enum": ["observation", "team_claim", "judge_confirmation", "scorekeeper_confirmation", "inference", "non_claim"]},
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "schema", "json_pointer"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^(sha256:)?[0-9a-fA-F]{64}$"},
+          "schema": {"type": "string", "minLength": 1},
+          "json_pointer": {"type": "string"}
+        }
+      }
+    },
+    "source_fields": {"type": "array", "items": {"type": "string"}},
+    "facts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_ref", "field", "value", "statement"],
+        "properties": {
+          "source_ref": {"type": "integer", "minimum": 0},
+          "field": {"type": "string"},
+          "value": {},
+          "statement": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "causal_refs": {"type": "array", "items": {"type": "string"}},
+    "score_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["red", "blue", "authority"],
+      "properties": {
+        "red": {"type": "integer"},
+        "blue": {"type": "integer"},
+        "authority": {"enum": ["none", "judge_receipt", "scorekeeper_receipt"]}
+      }
+    },
+    "score_after": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["red", "blue"],
+      "properties": {
+        "red": {"type": "integer"},
+        "blue": {"type": "integer"}
+      }
+    },
+    "claims": {"type": "array", "items": {"type": "string"}},
+    "non_claims": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  }
+}

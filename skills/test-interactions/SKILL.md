@@ -1,0 +1,526 @@
+---
+name: test-interactions
+description: >
+  Deterministic UI interaction testing against LIVE DOM via CDP.
+  All interactions target [data-qid] selectors. PASS/FAIL from thresholds, not LLM.
+  Batched VLM review at the end only — never in the test loop.
+triggers:
+  - test interactions
+  - test UI interactions
+  - interaction testing
+  - screenshot test plan
+  - test each element
+  - burst mode test
+  - animation testing
+  - interaction manifest
+  - test clicking navigation
+  - systematic UI test
+  - cots compliance test
+  - qid compliance
+metadata:
+  short-description: Deterministic UI interaction testing with COTS compliance
+provides:
+  - interaction-testing
+  - interaction-manifest
+  - burst-capture
+  - qid-compliance
+  - cots-assertions
+composes:
+  - surf
+  - review-design
+  - create-design-board
+  - interview
+  - best-practices-react
+  - best-practices-cots
+  - agentic-evals
+  - jev
+complies:
+  - best-practices-skills
+  - best-practices-python
+  - best-practices-react
+  - best-practices-cots
+taxonomy:
+  - validation
+  - precision
+  - fragility
+disciplines:
+  - evaluation-quality
+  - browser-automation
+  - ui-design-engineering
+---
+
+# test-interactions
+
+Deterministic UI interaction testing against the LIVE DOM via CDP.
+
+## PREREQUISITE: Read /best-practices-react FIRST
+
+Before writing ANY manifest or running ANY test, you MUST read
+`.pi/skills/best-practices-react/SKILL.md`. It defines:
+
+- The **4-attribute rule**: every interactive element needs `data-qid`,
+  `data-qs-action`, `title`, and `useRegisterAction`
+- QID naming conventions (`component:element:qualifier`)
+- How to verify qid coverage with `verify-data-qid.py`
+
+If you skip this, your manifests will target the wrong selectors and
+miss compliance requirements. This is not optional.
+
+## Architecture: Deterministic Run, Batched LLM Review
+
+```
+RUN stage (deterministic — no LLM)
+├── CDP interactions: click, hover, type, key, tab, scroll, wait
+├── DOM assertions: selector, visible, text, value, attribute, aria
+├── COTS assertions: min_size (C02), font_size (C01), contrast (C03),
+│   title (C14), focus_visible (C06)
+├── QID compliance scan: 4-attribute rule on all [data-qid] elements
+└── PASS/FAIL verdicts from thresholds and DOM state
+
+REVIEW stage (one batched LLM call at the end)
+├── vlm_image preprocessing: auto-crop, sharpen, upscale, stitch
+├── /review-design with REQUIRED --persona
+└── Visual critique of captured screenshots (does NOT change verdicts)
+```
+
+The LLM never decides pass/fail. It only comments on evidence after
+deterministic tests have already run.
+
+## Optional Jev page review
+
+The `review` command can reuse Surf's shared Jev browser integration. Jev may
+filter the live page for evidence relevant to a goal or assess whether a stated
+outcome appears satisfied. Both results are advisory and cannot change any
+interaction `PASS` or `FAIL`.
+
+```bash
+./run.sh review --captures ./captures --persona margaret-chen \
+  --jev optional --jev-goal "find evidence related to the failed controls" \
+  --jev-outcome "the settings were saved" --jev-tab-id <surf-tab-id>
+```
+
+Modes follow the shared workflow convention:
+
+- `optional` (default): continue normally if Surf/Jev is unavailable.
+- `disabled`: do not call Jev.
+- `required`: write the report and receipt, then fail closed if Jev did not complete.
+
+The receipt is written to `jev-semantic-review.json`. `$test-interactions` does
+not implement a second Jev client: it calls Surf's `semantic.filter` and
+`semantic.verify`. Surf owns credentials, page observation, provider calls, and
+fresh tab/ref checks. Jev never receives form values and never authorizes or
+executes browser actions here.
+
+## Evidence Boundary
+
+Deterministic DOM/COTS assertions own deterministic `PASS`, `FAIL`, `WARN`, and
+`SKIP`. Semantic or visual analysis may emit candidate visual findings only.
+Those findings are additive evidence; they never rewrite an interaction result.
+
+For selected interactions, the run stage preserves the untouched full-viewport
+screenshot and can emit structured visual evidence under `visual-evidence/`:
+
+- QID-bounded target crop derived from the target element's live CDP
+  `getBoundingClientRect()` result.
+- Semantic-container crop from an explicit `semantic_container`, `review_pane`,
+  `container`, or nearest stable ancestor.
+- Enlarged target crop for reviewer legibility.
+- Crop metadata with source image, QID, target rectangle, viewport, scale,
+  surface, element, action, run id, and interaction step.
+- Timestamped animation frames plus a playable WebM, or GIF fallback when
+  `ffmpeg` is unavailable.
+
+Structured visual findings use schema `test-interactions.visual-finding.v1`.
+Invalid analyst prose or malformed JSON is recorded as a review-failure artifact
+and produces zero structured findings. Use:
+
+```bash
+./run.sh validate-visual-findings \
+  --analyst-output analyst-output.jsonl \
+  --output visual-findings.jsonl \
+  --failure-output visual-findings-invalid.json
+```
+
+Visual-finding records must include the stable fingerprint, run id, surface,
+element, interaction step, QID when available, finding kind, confidence,
+observed state, expected state, reproduction, deterministic status, and evidence
+paths. The deterministic status field is copied for context only.
+
+## Ticket Finding Integration
+
+`ticket-findings` normalizes deterministic failures, live discovery findings,
+and schema-valid visual findings into preview-first ticket candidates. It
+delegates all GitHub mutation to `skills/ticket/run.sh`; this skill does not
+close, lease, block, release, or otherwise change issue lifecycle state.
+
+Policies:
+
+- `off` writes report-only candidates and performs no ticket work.
+- `preview` is the default; it searches open issues by stable fingerprint and
+  emits ticket previews or duplicate evidence-comment artifacts only.
+- `deterministic-only` permits deterministic run/discovery findings and
+  excludes visual-only candidates.
+- `high-confidence` permits only schema-valid visual findings above the
+  configured threshold with reproduction and evidence paths.
+- `apply-confirmed` is the only mutating mode. It calls `skills/ticket/run.sh`
+  with `--apply`, creates at most `--max-apply` issues, and independently reads
+  each created GitHub issue back.
+
+Fingerprints are derived from repository, target, surface/state, QID or
+missing-QID identity, finding kind, and normalized expected outcome. Run IDs,
+timestamps, and screenshot file names are not part of the fingerprint.
+
+```bash
+./run.sh ticket-findings \
+  --repo grahama1970/agent-skills \
+  --policy preview \
+  --discovery-findings ./discovery/discovery-findings.jsonl \
+  --replay-command "./run.sh discover --url http://localhost:3000 --output-dir ./discovery"
+
+./run.sh ticket-findings \
+  --repo grahama1970/agent-skills \
+  --policy apply-confirmed \
+  --max-apply 1 \
+  --discovery-findings ./discovery/discovery-findings.jsonl \
+  --replay-command "./run.sh discover --url http://localhost:3000 --output-dir ./discovery"
+```
+
+Outputs include `ticket-candidates.json`, `ticket-previews.json`,
+`ticket-duplicate-comments.json`, `ticket-apply-result.json`, and
+`ticket-failure.json` on fail-closed errors.
+
+## Page-Eval Finding Schema
+
+Project agents that evaluate full pages should use one strict returned schema
+while preserving evidence provenance. `normalize-page-eval` writes
+`page-eval.finding.v1` JSONL as a tagged union:
+
+- `finding_type`: `design`, `interaction`, `instrumentation`, or `visual`
+- `source_tool`: `impeccable` or `test-interactions`
+- `evidence_class`: `design`, `interaction`, `instrumentation`, or `visual`
+- `proof_grade`: `advisory` or `deterministic`
+
+Impeccable findings may appear in the same JSON stream as design findings, but
+they must remain `proof_grade=advisory` and must not carry deterministic
+`PASS`/`FAIL`. `$test-interactions` discovery/run findings are the only source
+of deterministic interaction or instrumentation failures.
+
+Use `--disable-impeccable` when a project agent should run the page-eval flow
+without ingesting Impeccable design findings:
+
+```bash
+./run.sh normalize-page-eval \
+  --repo grahama1970/agent-skills \
+  --target experiments/impeccable \
+  --route / \
+  --viewport 1280x800 \
+  --impeccable-findings ./artifacts/impeccable.json \
+  --discovery-findings ./discovery/discovery-findings.jsonl \
+  --output ./artifacts/page-eval-findings.jsonl \
+  --summary-output ./artifacts/page-eval-summary.json \
+  --replay-command "./run.sh discover --url http://localhost:3000 --output-dir ./discovery"
+
+./run.sh normalize-page-eval \
+  --repo grahama1970/agent-skills \
+  --target experiments/impeccable \
+  --route / \
+  --viewport 1280x800 \
+  --disable-impeccable \
+  --discovery-findings ./discovery/discovery-findings.jsonl \
+  --output ./artifacts/page-eval-findings.jsonl \
+  --summary-output ./artifacts/page-eval-summary.json \
+  --replay-command "./run.sh discover --url http://localhost:3000 --output-dir ./discovery"
+```
+
+`ticket-findings` can consume this unified stream:
+
+```bash
+./run.sh ticket-findings \
+  --repo grahama1970/agent-skills \
+  --policy preview \
+  --page-eval-findings ./artifacts/page-eval-findings.jsonl \
+  --replay-command "./run.sh normalize-page-eval ..."
+```
+
+This provides one project-agent workflow without schema laundering: design
+findings are ticketable as design bugs, but they are not interaction proof.
+
+## Critical Rules
+
+### 1. All selectors MUST be [data-qid]
+
+No `#id`, no `.class`, no `nth-child`, no XPath. Every interaction targets
+a `[data-qid='...']` selector. If an element doesn't have a `data-qid`,
+that's a bug in the component — fix it first.
+
+### 2. Persona is REQUIRED (non-negotiable)
+
+Every `review` and `full` command MUST specify `--persona`. The CLI will
+reject the command without one. A review without a persona produces generic,
+unfocused feedback that wastes everyone's time.
+
+Available personas:
+- `brandon-bailey` — CMMC/compliance: status indicators, access control, audit trails
+- `rob-armstrong` — Formal verification: proof obligations, trust boundaries
+- `margaret-chen` — Quality assurance: usability heuristics, error handling, edge cases
+- `nico-bailon` — Extraction QA: PDF fidelity, table verification, keyboard workflow
+
+### 3. Every LIVE DOM interactive component must be tested
+
+If it's in the DOM and it's interactive (button, link, input, select, tab),
+it must appear in a manifest and have assertions against it.
+
+### 4. Discovery is live, bounded, and QID-only
+
+`generate` and `discover` use a real CDP browser session to inventory rendered
+semantic controls, interactive ARIA roles, `data-qid`, `data-qs-action`, visible
+state, enabled state, bounding boxes, and reachable overlay/menu/dialog states.
+Source grep is not discovery.
+
+Discovery prevents loops with a stable state fingerprint plus `--max-depth`,
+`--max-states`, and `--max-actions`. It writes:
+
+- `discovery-inventory.json` for observed states and element evidence.
+- `discovery-findings.jsonl` for deterministic live-DOM findings.
+- `state-graph.json` for QID action transitions.
+- A replayable generated manifest containing only `[data-qid='...']`
+  executable selectors.
+
+Missing QIDs, duplicate QIDs, absent `data-qs-action`, absent `title`, manifest
+coverage gaps, keyboard-unreachable controls, inert actions, URL drift,
+console exceptions, failed network requests, and overlay focus-return defects
+are findings. They are not permission to invent `nth-child`, class, ID, text,
+XPath, or positional selector fallbacks.
+
+## Commands
+
+```bash
+# Generate an interaction manifest from a URL
+./run.sh generate --url "http://localhost:3000" --output manifest.json
+
+# Explore live DOM state and write inventory/findings/state graph plus manifest
+./run.sh discover --url "http://localhost:3000" --output-dir ./discovery --manifest-output manifest.json
+
+# Run the manifest — deterministic CDP + assertions → PASS/FAIL
+./run.sh run --manifest manifest.json --output-dir ./captures/
+
+# Preview repair tickets from deterministic or schema-valid findings
+./run.sh ticket-findings --repo owner/repo --policy preview --results ./captures/results.json --replay-command "./run.sh run --manifest manifest.json"
+
+# Normalize Impeccable + test-interactions artifacts into one strict JSON stream
+./run.sh normalize-page-eval --repo owner/repo --route / --viewport 1280x800 --disable-impeccable --discovery-findings ./discovery/discovery-findings.jsonl --output page-eval-findings.jsonl --replay-command "./run.sh discover --url http://localhost:3000 --output-dir ./discovery"
+
+# Review captures — PERSONA REQUIRED
+./run.sh review --captures ./captures/ --persona brandon-bailey
+
+# Full pipeline: generate → run → review — PERSONA REQUIRED
+./run.sh full --url "http://localhost:3000" --persona rob-armstrong --manifest manifest.json
+
+# Run tests via UX Lab Express test runner (Puppeteer CDP backend)
+./run.sh run-server
+./run.sh run-server --group design_board
+./run.sh run-server --test canvas_card_select
+```
+
+## Interaction Manifest Schema
+
+```json
+{
+  "version": 1,
+  "app": "My Dashboard",
+  "base_url": "http://localhost:3000",
+  "surfaces": [
+    {
+      "name": "main-dashboard",
+      "path": "/",
+      "wait_ready": "[data-qid='dashboard:header']",
+      "qid_compliance": true,
+      "elements": [
+        {
+          "name": "nav-sidebar",
+          "interactions": [
+            {
+              "action": "screenshot",
+              "description": "Sidebar in default state"
+            },
+            {
+              "action": "click",
+              "target": "[data-qid='nav:item:home']",
+              "description": "Click home nav item",
+              "screenshot_after": true,
+              "assert_title": "[data-qid='nav:item:home']",
+              "assert_qs_action": "[data-qid='nav:item:home']",
+              "assert_min_size": {"selector": "[data-qid='nav:item:home']", "min_width": 44, "min_height": 44}
+            },
+            {
+              "action": "tab",
+              "count": 3,
+              "description": "Tab through nav items, verify focus path",
+              "assert_focus_visible": "[data-qid='nav:item:settings']"
+            },
+            {
+              "action": "key",
+              "key": "Enter",
+              "description": "Activate focused nav item with Enter"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Actions
+
+| Action | Description | Key Fields |
+|--------|-------------|------------|
+| `screenshot` | Capture current state | `description` |
+| `click` | Click a [data-qid] element | `target` (required) |
+| `hover` | Hover over a [data-qid] element (triggers mouseenter/mouseover) | `target` (required) |
+| `type` | Type into a [data-qid] input | `target`, `value` |
+| `wait` | Wait for element to appear | `target`, `timeout_ms` |
+| `scroll` | Scroll page | `direction`, `amount` |
+| `key` | Press a keyboard key | `key` (Tab, Enter, Escape, Space, Arrow*) |
+| `tab` | Tab N times, track focus path | `count` (default 1) |
+
+## Assertions (Deterministic)
+
+### Standard DOM assertions
+
+| Assertion | Description |
+|-----------|-------------|
+| `assert_selector` | Element exists in DOM |
+| `assert_visible` | Element visible (not hidden/zero-size) |
+| `assert_text` | Text content matches |
+| `assert_absent` | Element NOT in DOM |
+| `assert_count` | Element count in {min, max} range |
+| `assert_attribute` | Element attribute value |
+| `assert_css` | Computed CSS property |
+| `assert_value` | Input/select current value |
+| `assert_url` | Current page URL |
+| `assert_enabled` / `assert_disabled` | Interactive element state |
+| `assert_aria` | ARIA attribute value |
+
+### COTS compliance assertions
+
+| Assertion | COTS Rule | Threshold |
+|-----------|-----------|-----------|
+| `assert_min_size` | C02 touch targets | >= 44x44px (WCAG 2.1) |
+| `assert_font_size` | C01 font size | >= 12px (MIL-STD-1472H) |
+| `assert_contrast` | C03 color contrast | >= 4.5:1 (WCAG 2.1 AA) |
+| `assert_title` | C14 tooltips | title attribute exists |
+| `assert_focus_visible` | C06 focus indicator | outline or boxShadow visible |
+
+### QID compliance assertions
+
+| Assertion | Description |
+|-----------|-------------|
+| `assert_qs_action` | Element has `data-qs-action` attribute |
+| `assert_title` | Element has `title` attribute |
+
+### Per-surface QID compliance scan
+
+Enabled by default (`qid_compliance: true`). After all interactions on a surface,
+scans every `[data-qid]` element for:
+
+- Missing `title` on interactive elements
+- Missing `data-qs-action` on interactive elements
+- Touch target < 44x44px on interactive elements
+
+Set `"qid_compliance": false` on a surface to skip.
+
+## VLM Image Preprocessing
+
+Before the batched LLM review, screenshots are preprocessed with `vlm_image.py`:
+
+- **auto_crop** — Trim dark borders from headless Chrome captures
+- **sharpen_text** — Enhance text edges for VLM OCR accuracy
+- **upscale** — Scale small images to 1200px width for readability
+- **compress** — Convert to JPEG if exceeds 500KB
+- **stitch_vertical** — Stack burst frames into single filmstrip
+
+Use `--no-preprocess` to skip.
+
+## Burst Mode (Animation Capture)
+
+For interactions with animations, use `"burst": true`. Captures multiple frames
+that get stitched into a filmstrip for the VLM review. Burst mode also records
+timestamped animation frames and a playable video artifact while keeping the
+standard screenshot-only path available for interactions without animations.
+
+```json
+{"action": "hover", "target": "[data-qid='animated:element']", "burst": true, "burst_frames": 10}
+```
+
+Use `"detect_animation_clipping": true` or `"expected_visual_state"` with an
+animation capture when a test should emit a schema-valid
+`animation_clipping` candidate if live geometry shows clipped frames. The
+click/hover/key assertion result remains separate and may still be `PASS`.
+
+## Workflow
+
+1. **Read /best-practices-react** — Understand qid conventions and 4-attribute rule
+2. **Generate** — Analyze target app and produce manifest with [data-qid] selectors
+3. **Run** — Deterministic CDP interactions + assertions → PASS/FAIL
+4. **Review** — Batch screenshots to /review-design with persona → visual critique
+5. **Decide** — Off-target or ugly captures are failures requiring implementation changes
+
+## Common Mistakes
+
+### WRONG: Running without reading /best-practices-react first
+```bash
+./run.sh full --url "..." --persona brandon-bailey
+# Manifest uses #id and .class selectors — all wrong
+```
+
+### RIGHT: Read /best-practices-react, then build manifest with [data-qid] selectors
+```bash
+# 1. Read .pi/skills/best-practices-react/SKILL.md
+# 2. Build manifest with [data-qid='component:element:qualifier'] selectors
+# 3. Run
+./run.sh full --url "..." --persona brandon-bailey --manifest manifest.json
+```
+
+### WRONG: Running review without persona
+```bash
+./run.sh review --captures ./captures/
+# ERROR: --persona is required
+```
+
+### WRONG: Using CSS selectors that aren't [data-qid]
+```json
+{"action": "click", "target": "#sidebar .menu-item:first-child"}
+```
+
+### RIGHT: All selectors are [data-qid]
+```json
+{"action": "click", "target": "[data-qid='nav:item:home']"}
+```
+
+### WRONG: Relying on LLM to decide pass/fail
+```bash
+# "Ask the VLM if the button looks correct" — NO
+```
+
+### RIGHT: Deterministic assertions decide pass/fail
+```json
+{
+  "action": "click",
+  "target": "[data-qid='nav:item:home']",
+  "assert_min_size": {"selector": "[data-qid='nav:item:home']", "min_width": 44, "min_height": 44},
+  "assert_title": "[data-qid='nav:item:home']",
+  "assert_qs_action": "[data-qid='nav:item:home']"
+}
+```
+
+## Integration
+
+| Composed Skill | Role |
+|----------------|------|
+| `/best-practices-react` | MUST READ FIRST — qid conventions, 4-attribute rule |
+| `/best-practices-cots` | COTS thresholds (C01-C15), scanner.cjs reference |
+| `/surf` | `surf go`, `surf click`, `surf snap` for browser automation |
+| `/review-design` | AI review of captured screenshots (batched, end only) |
+| `/create-design-board` | Track results across rounds in DESIGN_BOARD.md |
+| `/interview` | Resolve ambiguous elements or missing selectors |

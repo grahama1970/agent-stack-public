@@ -1,0 +1,1613 @@
+"""Run deterministic multi-trial command evaluations from JSON fixtures.
+
+Inputs are versioned fixture files with cases, commands, expected exit codes,
+and optional stdout/stderr containment checks. Outputs are JSON readiness
+reports. Failures are represented in the report; invalid fixtures fail closed
+with a non-zero CLI exit.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from statistics import mean
+from typing import Any
+
+import typer
+from dotenv import load_dotenv
+from loguru import logger
+
+import claims as claims_mod
+import coverage as coverage_mod
+import evidence as evidence_mod
+import provenance as provenance_mod
+import regressions as regressions_mod
+
+load_dotenv(override=False)
+
+app = typer.Typer(no_args_is_help=True)
+
+VALID_CASE_TYPES = {"positive", "negative", "adversarial"}
+EVAL_FIXTURES = ("fixtures/agentic_eval.json", "fixtures/eval.json")
+EVAL_PROVIDER_SKILLS = {"agentic-evals", "eval-skills"}
+TRIAL_ENV_SCRUB_KEYS = ("UV_PROJECT_ENVIRONMENT", "VIRTUAL_ENV", "PYTHONPYCACHEPREFIX")
+
+#: Captured streams are evidence, not logs. Bound them so one chatty case cannot
+#: make a report unreadable or unwritable, and scrub obvious secrets before they
+#: are persisted into a report that gets attached to tickets.
+MAX_STREAM_CHARS = 20000
+_SECRET_RE = re.compile(
+    r"(?i)\b(token|secret|api[_-]?key|password|passwd|authorization|bearer)\b(\s*[=:]\s*|\s+)(\S+)"
+)
+
+#: Outcomes are distinguished because they mean different things to a release
+#: gate: FAIL is a defect, BLOCKED is an unmet precondition, NOT_TESTED is
+#: absence of evidence. Only PASS on a required case contributes to READY.
+OUTCOME_PASS = "PASS"
+OUTCOME_FAIL = "FAIL"
+OUTCOME_BLOCKED = "BLOCKED"
+OUTCOME_NOT_TESTED = "NOT_TESTED"
+OUTCOME_SKIPPED = "SKIPPED"
+#: A trial that failed its oracle BUT whose failure signature matches one of
+#: the case's declared `infra_blocked_when` markers (provider rate limit,
+#: transport lock, recorded seat unavailability...). Only declared markers
+#: qualify -- an unknown error is never flake-eligible; it stays a FAIL.
+#: One INFRA_BLOCKED trial beside a PASS keeps the case passing (flake is
+#: surfaced, not punished); a case with ONLY infra-blocked trials is BLOCKED,
+#: never PASS.
+OUTCOME_INFRA_BLOCKED = "INFRA_BLOCKED"
+
+
+def _redact(text: str) -> str:
+    return _SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", text or "")
+
+
+def _bound(text: str) -> str:
+    text = _redact(text or "")
+    if len(text) <= MAX_STREAM_CHARS:
+        return text
+    half = MAX_STREAM_CHARS // 2
+    dropped = len(text) - MAX_STREAM_CHARS
+    return f"{text[:half]}\n...[{dropped} chars omitted]...\n{text[-half:]}"
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _json_pointer(doc: Any, pointer: str) -> Any:
+    """RFC6901 lookup. Raises KeyError with the failing segment."""
+    if pointer in ("", "/"):
+        return doc
+    node = doc
+    for raw in pointer.lstrip("/").split("/"):
+        token = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, list):
+            node = node[int(token)]
+        else:
+            node = node[token]
+    return node
+
+
+def _resolve(cwd: Path, raw: str) -> Path:
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else (cwd / candidate)
+
+
+def _artifact_value(cwd: Path, spec: dict[str, Any]) -> Any:
+    path = _resolve(cwd, spec["path"])
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return _json_pointer(doc, spec.get("json_pointer", ""))
+
+
+def check_artifacts(case: dict[str, Any], cwd: Path) -> tuple[list[str], dict[str, str]]:
+    """Assert on files the case produced, not on what it printed.
+
+    stdout substring matching cannot express "these two receipts name the same
+    session" or "the run left no artifact behind", which is what a real E2E case
+    needs to prove.
+    """
+    specs = case.get("expected", {}).get("artifacts") or []
+    problems: list[str] = []
+    hashes: dict[str, str] = {}
+    for spec in specs:
+        raw = spec.get("path")
+        if not raw:
+            problems.append("artifact spec missing 'path'")
+            continue
+        path = _resolve(cwd, raw)
+        if spec.get("absent"):
+            if path.exists():
+                problems.append(f"{raw}: expected absent, but it exists")
+            continue
+        if not path.is_file():
+            problems.append(f"{raw}: missing")
+            continue
+        digest = _sha256_file(path)
+        if digest:
+            hashes[raw] = digest
+        if "sha256" in spec and digest != spec["sha256"]:
+            problems.append(f"{raw}: sha256 {digest} != {spec['sha256']}")
+        if spec.get("min_bytes") is not None and path.stat().st_size < int(spec["min_bytes"]):
+            problems.append(f"{raw}: {path.stat().st_size} bytes < min_bytes {spec['min_bytes']}")
+        wants_value = "equals" in spec or "json_pointer" in spec or "equals_artifact" in spec
+        if not wants_value:
+            continue
+        try:
+            value = _artifact_value(cwd, spec)
+        except (OSError, ValueError, KeyError, IndexError) as exc:
+            problems.append(f"{raw}: cannot read {spec.get('json_pointer', '')!r}: {exc}")
+            continue
+        if "equals" in spec and value != spec["equals"]:
+            problems.append(f"{raw}{spec.get('json_pointer', '')}: {value!r} != {spec['equals']!r}")
+        other = spec.get("equals_artifact")
+        if other:
+            try:
+                other_value = _artifact_value(cwd, other)
+            except (OSError, ValueError, KeyError, IndexError) as exc:
+                problems.append(f"{other.get('path')}: cannot read for cross-check: {exc}")
+                continue
+            if value != other_value:
+                problems.append(
+                    f"cross-artifact mismatch: {raw}{spec.get('json_pointer', '')}={value!r} "
+                    f"!= {other['path']}{other.get('json_pointer', '')}={other_value!r}"
+                )
+    return problems, hashes
+
+
+def _pids_in_group(pgid: int) -> list[int]:
+    survivors: list[int] = []
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return survivors
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            if os.getpgid(pid) == pgid:
+                survivors.append(pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+    return survivors
+
+
+def _terminate_group(proc: subprocess.Popen) -> list[int]:
+    """Kill the trial's whole process group and report survivors.
+
+    subprocess timeouts kill only the direct child. A timed-out case that leaves
+    a grandchild holding a lock silently corrupts every later case in a serial
+    run, so teardown is verified rather than assumed.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return []
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            break
+        try:
+            proc.wait(timeout=5)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    return [pid for pid in _pids_in_group(pgid) if pid != os.getpid()]
+
+
+def load_manifest(path: Path, *, focused: bool = False) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("version") != 2:
+        raise typer.BadParameter("fixture version must be 2")
+    cases = manifest.get("cases")
+    if not isinstance(cases, list):
+        raise typer.BadParameter("fixture must contain a cases list")
+    trials = manifest.get("trials", 3)
+    if not isinstance(trials, int) or trials < 1:
+        raise typer.BadParameter("trials must be a positive integer")
+    for case in cases:
+        validate_case(case)
+    class_problems: list[str] = []
+    for case in cases:
+        class_problems.extend(evidence_mod.validate_evidence_class(case))
+    class_problems.extend(claims_mod.validate_claims(manifest))
+    class_problems.extend(coverage_mod.validate_seams(manifest))
+    class_problems.extend(_supports_claims_problems(manifest, cases))
+    class_problems.extend(provenance_mod.validate_manifest_provenance(manifest, cases))
+    if class_problems:
+        raise typer.BadParameter("; ".join(class_problems))
+    if not focused:
+        # A focused rerun (--case) re-executes cases that already passed the
+        # gate inside their parent fixture; forcing every such rerun to pad in
+        # an unrelated adversarial case tested nothing (agent-skills#1464).
+        # Per-case validation above still applies unconditionally.
+        _assert_not_slop(manifest, cases, trials)
+    return manifest
+
+
+def _supports_claims_problems(manifest: dict[str, Any], cases: list[dict[str, Any]]) -> list[str]:
+    """Every case's supports_claims must reference a declared capability claim.
+
+    A case that supports an undeclared claim is a typo that would silently leave
+    a real claim unproven, so it fails closed rather than being ignored.
+    """
+    declared = {c.get("id") for c in (manifest.get("capability_claims") or [])}
+    problems: list[str] = []
+    for case in cases:
+        for cid in case.get("supports_claims") or []:
+            if cid not in declared:
+                problems.append(
+                    f"case {case['name']!r} supports_claims references undeclared claim {cid!r}"
+                )
+    return problems
+
+
+_TRIVIAL_PROGRAMS = frozenset({"echo", "true", ":", "printf", "test", "[", "cat", "ls", "pwd", "head"})
+
+
+def _command_text(command: list[str]) -> str:
+    """Effective command text, unwrapping bash/sh -c so heuristics see the real work."""
+    if len(command) >= 3 and command[0] in {"bash", "sh"} and command[1] == "-c":
+        return command[2]
+    return " ".join(command)
+
+
+def _is_trivial(command: list[str]) -> bool:
+    """A case that only echoes/returns a constant proves nothing — self-serving slop."""
+    text = _command_text(command).strip()
+    first = text.split()[0] if text.split() else ""
+    if first in _TRIVIAL_PROGRAMS and not any(tok in text for tok in ("&&", "||", ";", "|", ".sh", ".py", "curl", "http")):
+        return True
+    return False
+
+
+def _is_real_world(case: dict[str, Any]) -> bool:
+    """A real-world case is explicitly flagged AND exercises a live path, not a stub.
+
+    It must invoke a substantive program (a skill entrypoint, script, live HTTP,
+    or test runner) and must NOT feed itself canned fixture/stub inputs, which
+    would make it prove plumbing rather than real behavior.
+    """
+    if not case.get("real_world"):
+        return False
+    text = _command_text(case["command"])
+    if "fixtures/" in text or "/fixtures/" in text:
+        return False
+    return any(marker in text for marker in ("run.sh", ".py", "curl", "http://", "https://", "pytest", "nightly", "e2e"))
+
+
+def _is_non_deterministic(case: dict[str, Any]) -> bool:
+    """A case that samples fresh inputs each run rather than a hard-coded key.
+
+    Non-determinism is what makes an adversarial eval bite: a fixed-key case can
+    be satisfied by overfitting to that one key, and it silently rots as the
+    system moves. The markers below name the sampling explicitly so the runner
+    can require it, not infer it.
+    """
+    text = _command_text(case["command"])
+    # Explicit sampling markers only. A probe SCRIPT name is not enough --
+    # "analyst_probe.py resolve CWE-999999" is a fixed key. Non-determinism
+    # means the case draws fresh inputs each run: a --samples/--seed sweep or a
+    # shell $RANDOM. (Caught by the gate on monitor-sparta, whose fixed-key
+    # probe calls were wrongly counted as non-deterministic.)
+    return "--samples" in text or "--seed" in text or "RANDOM" in text
+
+
+def _compliance_tier_problems(manifest: dict[str, Any], cases: list[dict[str, Any]]) -> list[str]:
+    """Enforce the compliance-grade eval contract when a fixture declares it.
+
+    Ordinary skills keep the baseline gate (>=1 adversarial, >=1 real-world). A
+    fixture that sets `eval_tier: "compliance"` is asserting it guards a
+    compliance pipeline stage, and the runner then MANDATES what practice alone
+    does not guarantee (operator directive 2026-08-12, "this is a compliance
+    pipeline and must be robustly hardened"):
+
+      - the majority of cases are adversarial/negative, not positive controls
+      - at least one case is non-deterministic (samples fresh inputs per run)
+      - every non-deterministic case names a per-run sample size of >= 50, so a
+        stage's nightly coverage is hundreds-to-thousands of assertions, not a
+        handful
+
+    Declaring the tier and then failing to meet it is itself a slop failure:
+    the mandate cannot be satisfied by removing the declaration quietly, because
+    the compliance pipeline's own fixtures set it and their conformance tests
+    read it back.
+    """
+    if manifest.get("eval_tier") != "compliance":
+        return []
+    problems: list[str] = []
+    adversarial = [c for c in cases if c.get("type") in {"negative", "adversarial"}]
+    if len(adversarial) * 2 <= len(cases):
+        problems.append(
+            f"eval_tier=compliance requires a strict MAJORITY of cases to be adversarial/negative "
+            f"(more than half, not exactly half); got {len(adversarial)}/{len(cases)}"
+        )
+    nd = [c for c in cases if _is_non_deterministic(c)]
+    if not nd:
+        problems.append(
+            "eval_tier=compliance requires at least one non-deterministic case "
+            "(--samples/--seed/random probe); a fixed-key-only fixture cannot harden a pipeline"
+        )
+    for c in nd:
+        text = _command_text(c["command"])
+        import re as _re
+        sizes = [int(n) for n in _re.findall(r"--samples\s+(\d+)", text)]
+        if sizes and max(sizes) < 50:
+            problems.append(
+                f"eval_tier=compliance case {c['name']!r} samples only {max(sizes)}; "
+                "compliance stages need >= 50 assertions per run (target ~1000/stage across modes)"
+            )
+    return problems
+
+
+def _assert_not_slop(manifest: dict[str, Any], cases: list[dict[str, Any]], trials: int) -> None:
+    """Fail-closed on self-serving slop fixtures.
+
+    Prevents the failure mode where an eval passes trivially without proving the
+    skill works: it requires repeatability, an adversarial/negative check, and at
+    least one real-world case that exercises a live path without stub inputs.
+    """
+    # Narrow, explicit exemption: fixtures that test the runner itself or serve
+    # as documentation examples are not skill evaluations. They must say so.
+    # This is NEVER valid for a real skill's evaluation fixture.
+    if manifest.get("eval_kind") in {"runner_selftest", "scaffold"}:
+        return
+    problems: list[str] = []
+    if trials < 2:
+        problems.append("trials must be >= 2 for repeatability (a single-trial eval is not evidence)")
+    trivial = [c["name"] for c in cases if _is_trivial(c["command"])]
+    if trivial:
+        problems.append(f"trivial echo/constant cases prove nothing: {trivial}")
+    if not any(c.get("type") in {"negative", "adversarial"} for c in cases):
+        problems.append("no negative or adversarial case — an all-positive fixture is self-serving")
+    if not any(_is_real_world(c) for c in cases):
+        problems.append(
+            "no real-world case: at least one case must set \"real_world\": true and exercise a live "
+            "path (skill entrypoint / script / live HTTP / test runner) WITHOUT feeding itself "
+            "fixtures/ stub inputs"
+        )
+    problems.extend(_compliance_tier_problems(manifest, cases))
+    if problems:
+        raise typer.BadParameter(
+            "fixture rejected as low-value ('slop'): "
+            + "; ".join(problems)
+            + ". An agentic eval must prove real-world behavior, not deterministic plumbing."
+        )
+
+
+def validate_case(case: dict[str, Any]) -> None:
+    if not isinstance(case.get("name"), str) or not case["name"]:
+        raise typer.BadParameter("each case needs a non-empty name")
+    if case.get("type") not in VALID_CASE_TYPES:
+        raise typer.BadParameter(f"case {case['name']} has invalid type")
+    command = case.get("command")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(part, str) for part in command)
+    ):
+        raise typer.BadParameter(f"case {case['name']} command must be a non-empty argv list")
+    expected = case.get("expected")
+    if not isinstance(expected, dict) or not isinstance(expected.get("exit_code"), int):
+        raise typer.BadParameter(f"case {case['name']} expected.exit_code must be an integer")
+    must_exercise = case.get("must_exercise") or []
+    if not isinstance(must_exercise, list) or not all(isinstance(item, str) and item for item in must_exercise):
+        raise typer.BadParameter(f"case {case['name']} must_exercise must be a list of non-empty strings")
+    command_text = _command_text(command)
+    missing = [marker for marker in must_exercise if marker not in command_text]
+    if missing:
+        raise typer.BadParameter(
+            f"case {case['name']} must exercise downstream contract(s) in its top-level command; "
+            f"missing {missing!r}. Wrapper-only checks are not accepted as proof."
+        )
+
+
+def _stream_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def trial_environment() -> dict[str, str]:
+    """Return an environment for evaluated commands without runner venv leakage."""
+    env = os.environ.copy()
+    for key in TRIAL_ENV_SCRUB_KEYS:
+        env.pop(key, None)
+    return env
+
+
+def run_trial(command: list[str], cwd: Path, timeout_seconds: float) -> dict[str, Any]:
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=trial_environment(),
+        text=True,
+        start_new_session=True,
+    )
+    timed_out = False
+    survivors: list[int] = []
+    try:
+        out, err = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        survivors = _terminate_group(proc)
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+    return {
+        "exit_code": None if timed_out else proc.returncode,
+        # Persisted streams are redacted+bounded; the RAW streams ride along
+        # under _-prefixed keys for oracle matching only and are stripped
+        # before the report is written. Matching against redacted text caused
+        # a false FAIL (2026-08-19): output '...returned the token\nCOMPLIANT'
+        # had 'COMPLIANT' eaten by the secret redactor ('token' + whitespace +
+        # word), so the expected marker could never match.
+        "stdout": _bound(_stream_text(out)),
+        "stderr": _bound(_stream_text(err)),
+        "_stdout_raw": _stream_text(out),
+        "_stderr_raw": _stream_text(err),
+        "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        "timed_out": timed_out,
+        "orphan_pids_after_teardown": survivors,
+    }
+
+
+def trial_passed(case: dict[str, Any], trial: dict[str, Any]) -> bool:
+    """Back-compatible boolean view of trial_outcome."""
+    return trial_outcome(case, trial, Path(trial.get("_cwd", ".")))[0] == OUTCOME_PASS
+
+
+def trial_outcome(case: dict[str, Any], trial: dict[str, Any], cwd: Path) -> tuple[str, list[str]]:
+    """Classify one trial, and say why when it is not a pass."""
+    if trial["timed_out"]:
+        detail = [f"timed out after {round(trial['duration_ms'] / 1000)}s"]
+        if trial.get("orphan_pids_after_teardown"):
+            detail.append(
+                "process group survived teardown: "
+                + ", ".join(str(pid) for pid in trial["orphan_pids_after_teardown"])
+            )
+        return OUTCOME_FAIL, detail
+    if trial.get("orphan_pids_after_teardown"):
+        return OUTCOME_FAIL, [
+            "process group survived teardown: "
+            + ", ".join(str(pid) for pid in trial["orphan_pids_after_teardown"])
+        ]
+    stdout_for_match = trial.get("_stdout_raw", trial["stdout"])
+    stderr_for_match = trial.get("_stderr_raw", trial["stderr"])
+    for marker in case.get("blocked_when_stdout_contains", []) or []:
+        if marker in stdout_for_match or marker in stderr_for_match:
+            return OUTCOME_BLOCKED, [f"precondition unmet: saw {marker!r}"]
+    expected = case["expected"]
+    problems: list[str] = []
+    if trial["exit_code"] != expected["exit_code"]:
+        problems.append(f"exit_code {trial['exit_code']} != {expected['exit_code']}")
+    for needle in expected.get("stdout_contains", []):
+        if needle not in stdout_for_match:
+            problems.append(f"stdout missing {needle!r}")
+    for needle in expected.get("stderr_contains", []):
+        if needle not in stderr_for_match:
+            problems.append(f"stderr missing {needle!r}")
+    for needle in expected.get("stdout_excludes", []) or []:
+        if needle in stdout_for_match:
+            problems.append(f"stdout unexpectedly contains {needle!r}")
+    artifact_problems, hashes = check_artifacts(case, cwd)
+    problems.extend(artifact_problems)
+    if problems:
+        # Flakiness policy (2026-08-19 review): a failed trial whose output
+        # carries a DECLARED external-blocker marker is INFRA_BLOCKED, not a
+        # regression. Semantic violations without a declared marker always
+        # stay FAIL -- unknown errors are never flake-eligible.
+        for marker in case.get("infra_blocked_when", []) or []:
+            if marker in stdout_for_match or marker in stderr_for_match:
+                return OUTCOME_INFRA_BLOCKED, [f"external blocker: saw {marker!r}", *problems]
+    if hashes:
+        trial["artifact_hashes"] = hashes
+    return (OUTCOME_PASS if not problems else OUTCOME_FAIL), problems
+
+
+def case_outcome(trial_outcomes: list[str]) -> str:
+    if not trial_outcomes:
+        return OUTCOME_NOT_TESTED
+    if all(outcome == OUTCOME_PASS for outcome in trial_outcomes):
+        return OUTCOME_PASS
+    if any(outcome == OUTCOME_FAIL for outcome in trial_outcomes):
+        return OUTCOME_FAIL
+    # PASS + INFRA_BLOCKED = pass-with-flake: the semantic behavior was proven
+    # by the passing trial and the failing trial named a declared external
+    # blocker. ONLY infra-blocked trials = BLOCKED (unmet precondition), never
+    # PASS -- two externally blocked trials prove nothing about the subject.
+    if any(outcome == OUTCOME_PASS for outcome in trial_outcomes) and all(
+        outcome in {OUTCOME_PASS, OUTCOME_INFRA_BLOCKED} for outcome in trial_outcomes
+    ):
+        return OUTCOME_PASS
+    return OUTCOME_BLOCKED
+
+
+def readiness_for(case_reports: list[dict[str, Any]]) -> str:
+    """READY means every REQUIRED case passed every trial.
+
+    A required BLOCKED case is an unmet precondition, so it cannot contribute to
+    READY -- otherwise a suite that never exercised its own subject reports the
+    same state as one that passed.
+    """
+    if not case_reports:
+        return "NOT_ESTABLISHED"
+    required = [c for c in case_reports if c.get("required", True)]
+    scored = required or case_reports
+    if all(
+        c.get("outcome", OUTCOME_NOT_TESTED) == OUTCOME_PASS
+        and c.get("evidence_eligibility", {}).get("eligible", True)
+        for c in scored
+    ):
+        return "READY"
+    if any(
+        c["passed_trials"] > 0 and c.get("evidence_eligibility", {}).get("eligible", True)
+        for c in scored
+    ):
+        return "USABLE_WITH_GAPS"
+    return "NOT_READY"
+
+
+_READINESS_RANK = {
+    "READY": 3,
+    "USABLE_WITH_GAPS": 2,
+    "NOT_READY": 1,
+    "NOT_ESTABLISHED": 0,
+}
+
+
+def _worse_readiness(a: str, b: str) -> str:
+    """Return the weaker of two readiness states (lowest rank wins)."""
+    return a if _READINESS_RANK.get(a, 0) <= _READINESS_RANK.get(b, 0) else b
+
+
+def _repo_provenance(cwd: Path) -> dict[str, Any]:
+    def _git(*args: str) -> str | None:
+        try:
+            out = subprocess.run(
+                ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        value = out.stdout.strip()
+        return value or None
+
+    return {"sha": _git("rev-parse", "HEAD"), "ref": _git("rev-parse", "--abbrev-ref", "HEAD")}
+
+
+def evaluate_manifest(
+    path: Path,
+    timeout_seconds: float,
+    only_cases: list[str] | None = None,
+) -> dict[str, Any]:
+    focused = bool(only_cases)
+    manifest = load_manifest(path, focused=focused)
+    trials = manifest.get("trials", 3)
+    cwd = path.parent
+    run_id = uuid.uuid4().hex[:12]
+    fixture_sha256 = _sha256_file(path)
+    repo = _repo_provenance(cwd)
+    cases = []
+    raw_cases = manifest["cases"]
+    if only_cases:
+        by_name = {c.get("name"): c for c in raw_cases}
+        unknown = [n for n in only_cases if n not in by_name]
+        if unknown:
+            raise typer.BadParameter(
+                f"--case names not in manifest: {', '.join(unknown)}; "
+                f"valid: {', '.join(sorted(by_name))}"
+            )
+        raw_cases = [by_name[n] for n in only_cases]
+    for index, case in enumerate(raw_cases):
+        case_id = f"{run_id}-c{index:03d}"
+        # A case may declare its own timeout (real-world cases that run a live
+        # nightly need minutes, not the 30s default that fits unit-test cases).
+        case_timeout = case.get("timeout_seconds", timeout_seconds)
+        try:
+            case_timeout = max(0.1, float(case_timeout))
+        except (TypeError, ValueError):
+            case_timeout = timeout_seconds
+        provenance = provenance_mod.case_provenance(
+            manifest,
+            case,
+            fixture_sha256=fixture_sha256,
+            repo=repo,
+        )
+        results = []
+        outcomes = []
+        problems: list[str] = []
+        for trial_index in range(trials):
+            trial = run_trial(case["command"], cwd, case_timeout)
+            trial["trial_id"] = f"{case_id}-t{trial_index:02d}"
+            outcome, why = trial_outcome(case, trial, cwd)
+            trial["outcome"] = outcome
+            trial["problems"] = why
+            trial["execution_provenance"] = {
+                "execution_mode": provenance["execution_mode"],
+                "fixture_sha256": provenance["fixture_sha256"],
+                "test_source_sha256": provenance["test_source_sha256"],
+                "oracle_sha256": provenance["oracle_sha256"],
+                "generation_id": provenance["generation_id"],
+                "generated_test_lineage": provenance["generated_test_lineage"],
+                "prior_test_source_sha256": provenance["prior_test_source_sha256"],
+                "prior_oracle_sha256": provenance["prior_oracle_sha256"],
+                "application_identity": provenance["application_identity"],
+                "mutation_provenance": provenance["mutation_provenance"],
+                "evidence_eligibility": provenance["evidence_eligibility"],
+            }
+            # Raw streams were for oracle matching only; the persisted report
+            # keeps the redacted+bounded copies.
+            trial.pop("_stdout_raw", None)
+            trial.pop("_stderr_raw", None)
+            outcomes.append(outcome)
+            problems.extend(why)
+            results.append(trial)
+        passed_trials = sum(1 for outcome in outcomes if outcome == OUTCOME_PASS)
+        infra_blocked_trials = sum(1 for outcome in outcomes if outcome == OUTCOME_INFRA_BLOCKED)
+        qual = evidence_mod.qualify(case)
+        observed_outcome = case_outcome(outcomes)
+        force_integrity_fail = bool(
+            provenance["evidence_eligibility"]["integrity_errors"]
+            or (
+                provenance["execution_mode"] == provenance_mod.ExecutionMode.REGRESSION_REPLAY.value
+                and provenance["mutation_provenance"]["changed_between_failure_and_observed_pass"]
+            )
+        )
+        outcome = OUTCOME_FAIL if observed_outcome == OUTCOME_PASS and force_integrity_fail else observed_outcome
+        if force_integrity_fail:
+            problems.extend(
+                f"evidence integrity: {reason}"
+                for reason in provenance["evidence_eligibility"]["reason_codes"]
+            )
+        cases.append(
+            {
+                "infra_blocked_trials": infra_blocked_trials,
+                # A passing case that needed a flake-excused trial stays PASS
+                # but is flagged so health tracking can see provider decay.
+                "flaky": bool(infra_blocked_trials and case_outcome(outcomes) == OUTCOME_PASS),
+                "name": case["name"],
+                "type": case["type"],
+                "case_id": case_id,
+                "required": bool(case.get("required", True)),
+                "outcome": outcome,
+                "observed_outcome": observed_outcome,
+                "problems": sorted(set(problems)),
+                "argv": list(case["command"]),
+                "execution_mode": provenance["execution_mode"],
+                "execution_provenance": provenance,
+                "test_source_sha256": provenance["test_source_sha256"],
+                "oracle_sha256": provenance["oracle_sha256"],
+                "application_identity": provenance["application_identity"],
+                "generated_test_lineage": provenance["generated_test_lineage"],
+                "evidence_eligibility": provenance["evidence_eligibility"],
+                "declared_evidence_class": qual["declared"],
+                "effective_evidence_class": qual["effective"],
+                "live_qualified": qual["live_qualified"],
+                "evidence_disqualifiers": qual["reasons"],
+                "supports_claims": case.get("supports_claims") or [],
+                "seams": case.get("seams") or [],
+                "passed_trials": passed_trials,
+                "total_trials": trials,
+                "pass_rate": round(passed_trials / trials, 4) if trials else 0.0,
+                "avg_latency_ms": round(mean(result["duration_ms"] for result in results), 3)
+                if results
+                else 0.0,
+                "trials": results,
+            }
+        )
+    # The manifest's own proof scope and claims are the honest description of
+    # what this suite proves. Overwriting them with a generic "fixture wiring
+    # smoke" claim made every report -- including live-provider suites --
+    # understate or misstate its own evidence.
+    default_claims = {
+        "proves": "declared local commands met explicit fixture expectations across repeated trials",
+        "does_not_prove": "semantic correctness, live services, LLM judge behavior, or release readiness",
+    }
+    live = bool(manifest.get("live", any(c.get("real_world") for c in raw_cases)))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    enriched = [
+        claims_mod.enrich_case(report, spec, evidence_mod.qualify(spec))
+        for report, spec in zip(cases, raw_cases)
+    ]
+    capability_readiness = claims_mod.compute_readiness(manifest, enriched, now_iso)
+    case_readiness = readiness_for(cases)
+    effective = case_readiness
+    if focused:
+        # A focused rerun cannot span the manifest's claims by construction;
+        # blending claim coverage in would make a 100%-pass rerun read
+        # USABLE_WITH_GAPS forever (agent-skills#1468). Case readiness is the
+        # verdict; claim coverage is reported as explicitly partial.
+        capability_readiness = None
+    if capability_readiness is not None:
+        # When capability claims are declared the gate is the WORSE of the two:
+        # twenty green deterministic cases cannot make a claim with an unmet
+        # required live slot report READY.
+        effective = _worse_readiness(case_readiness, capability_readiness["aggregate_readiness"])
+    return {
+        "schema": "agentic_evals.report.v2",
+        "source": str(path),
+        "run_id": run_id,
+        "fixture_sha256": fixture_sha256,
+        "repo": repo,
+        "mocked": bool(manifest.get("mocked", False)),
+        "fixture_backed": True,
+        "live": live,
+        "proof_scope": manifest.get("proof_scope") or "fixture wiring smoke",
+        "claims": manifest.get("claims") or default_claims,
+        "what_was_exercised": manifest.get("what_was_exercised")
+        or "local commands declared in the fixture manifest",
+        "what_remains_unverified": manifest.get("what_remains_unverified")
+        or "semantic correctness, live services, LLM judge behavior, and release readiness",
+        "readiness": effective,
+        "case_readiness": case_readiness,
+        "capability_readiness": capability_readiness,
+        "claims_coverage": ("partial: focused --case run" if focused else "manifest-spanning"),
+        "focused_cases": list(only_cases or []),
+        "generated_at": now_iso,
+        "case_count": len(cases),
+        "required_case_count": sum(1 for c in cases if c["required"]),
+        "outcome_counts": {
+            outcome: sum(1 for c in cases if c["outcome"] == outcome)
+            for outcome in (OUTCOME_PASS, OUTCOME_FAIL, OUTCOME_BLOCKED, OUTCOME_NOT_TESTED)
+        },
+        "trial_count": sum(case["total_trials"] for case in cases),
+        "cases": cases,
+    }
+
+
+def classify_eval_posture(skill_dir: Path) -> str:
+    skill_md = skill_dir / "SKILL.md"
+    text = skill_md.read_text(encoding="utf-8", errors="ignore") if skill_md.exists() else ""
+    if skill_dir.name in EVAL_PROVIDER_SKILLS:
+        return "eval_provider"
+    if (skill_dir / "fixtures" / "agentic_eval.json").exists():
+        return "agentic_fixture"
+    if (skill_dir / "fixtures" / "eval.json").exists():
+        return "legacy_eval_fixture"
+    if "agentic-evals" in text or "eval-skills" in text:
+        return "delegates_to_eval_skill"
+    if "eval_not_required" in text:
+        return "eval_not_required"
+    return "missing"
+
+
+def run_validator(skill_dir: Path, skills_root: Path, validator: Path, timeout_seconds: float) -> list[dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(validator),
+                str(skill_dir),
+                "--json",
+                "--skills-root",
+                str(skills_root),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error("validator timed out for {}: {}", skill_dir.name, exc)
+        return [
+            {
+                "rule": "VALIDATOR_TIMEOUT",
+                "severity": "error",
+                "skill": skill_dir.name,
+                "message": f"validator exceeded {timeout_seconds} seconds",
+            }
+        ]
+    if result.returncode != 0:
+        return [
+            {
+                "rule": "VALIDATOR_RUNNER",
+                "severity": "error",
+                "skill": skill_dir.name,
+                "message": result.stderr.strip() or result.stdout.strip() or "validator failed",
+            }
+        ]
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        logger.error("validator returned invalid JSON for {}: {}", skill_dir.name, exc)
+        return [
+            {
+                "rule": "VALIDATOR_JSON",
+                "severity": "error",
+                "skill": skill_dir.name,
+                "message": "validator returned invalid JSON",
+            }
+        ]
+    return parsed if isinstance(parsed, list) else []
+
+
+def audit_skills_report(skills_root: Path, validator: Path, timeout_seconds: float) -> dict[str, Any]:
+    skills = sorted(path for path in skills_root.iterdir() if (path / "SKILL.md").exists())
+    skill_reports = []
+    findings: list[dict[str, Any]] = []
+    for skill_dir in skills:
+        posture = classify_eval_posture(skill_dir)
+        skill_findings = run_validator(skill_dir, skills_root, validator, timeout_seconds)
+        eval_findings = [finding for finding in skill_findings if finding.get("rule") in {"EVAL001", "EVAL002"}]
+        eval001_findings = [finding for finding in eval_findings if finding.get("rule") == "EVAL001"]
+        eval002_findings = [finding for finding in eval_findings if finding.get("rule") == "EVAL002"]
+        recommended_action = recommended_action_for(
+            skill_dir,
+            posture,
+            needs_fixture=bool(eval001_findings),
+            needs_composition=bool(eval002_findings),
+        )
+        findings.extend(skill_findings)
+        skill_reports.append(
+            {
+                "skill": skill_dir.name,
+                "eval_posture": posture,
+                "eval_required": bool(eval_findings),
+                "needs_agentic_evals_composition": bool(eval002_findings),
+                "recommended_action": recommended_action,
+                "eval_findings": eval_findings,
+            }
+        )
+
+    posture_counts: dict[str, int] = {}
+    for item in skill_reports:
+        posture = item["eval_posture"]
+        posture_counts[posture] = posture_counts.get(posture, 0) + 1
+    action_counts: dict[str, int] = {}
+    for item in skill_reports:
+        action = item["recommended_action"]
+        action_counts[action] = action_counts.get(action, 0) + 1
+
+    eval001 = [finding for finding in findings if finding.get("rule") == "EVAL001"]
+    eval002 = [finding for finding in findings if finding.get("rule") == "EVAL002"]
+    return {
+        "schema": "agentic_evals.skill_posture_audit.v1",
+        "mocked": False,
+        "live": False,
+        "proof_scope": "static repository eval posture audit",
+        "claims": {
+            "proves": "which top-level skills currently declare eval posture and compose agentic-evals",
+            "does_not_prove": "per-skill semantic behavior, live service behavior, or fixture quality",
+        },
+        "skills_root": str(skills_root),
+        "validator": str(validator),
+        "summary": {
+            "skills_checked": len(skills),
+            "total_findings": len(findings),
+            "eval001_count": len(eval001),
+            "eval002_count": len(eval002),
+            "posture_counts": posture_counts,
+            "recommended_action_counts": action_counts,
+            "eval001_skills": sorted({finding["skill"] for finding in eval001}),
+            "eval002_skills": sorted({finding["skill"] for finding in eval002}),
+        },
+        "skills": skill_reports,
+        "findings": findings,
+    }
+
+
+def recommended_action_for(
+    skill_dir: Path,
+    posture: str,
+    needs_fixture: bool,
+    needs_composition: bool,
+) -> str:
+    if not needs_fixture and not needs_composition:
+        return "none"
+    if needs_composition and not needs_fixture:
+        return "compose_agentic_evals"
+    if needs_composition and needs_fixture:
+        if (skill_dir / "sanity.sh").exists() or (skill_dir / "run.sh").exists():
+            return "compose_agentic_evals_and_scaffold_fixture"
+        return "compose_agentic_evals_and_scaffold_static_validation_fixture"
+    if posture != "missing":
+        return "strengthen_existing_eval"
+    if (skill_dir / "sanity.sh").exists() or (skill_dir / "run.sh").exists():
+        return "scaffold_fixture"
+    return "scaffold_static_validation_fixture"
+
+
+def _entrypoint_command(fixture_dir: Path, entrypoint: Path, *args: str) -> list[str]:
+    rel_entrypoint = os.path.relpath(entrypoint, start=fixture_dir)
+    return ["bash", rel_entrypoint, *args]
+
+
+def _validator_command(fixture_dir: Path, skill_dir: Path) -> list[str]:
+    validator = skill_dir.parent / "best-practices-skills" / "scripts" / "validate_skill.py"
+    rel_validator = os.path.relpath(validator, start=fixture_dir)
+    rel_skill = os.path.relpath(skill_dir, start=fixture_dir)
+    return ["python3", rel_validator, rel_skill, "--json"]
+
+
+def scaffold_manifest(skill_dir: Path, fixture_dir: Path) -> dict[str, Any]:
+    skill_name = skill_dir.name
+    if (skill_dir / "sanity.sh").exists():
+        case = {
+            "name": "sanity",
+            "type": "positive",
+            "command": _entrypoint_command(fixture_dir, skill_dir / "sanity.sh"),
+            "expected": {"exit_code": 0},
+        }
+    elif (skill_dir / "run.sh").exists():
+        case = {
+            "name": "run-help",
+            "type": "positive",
+            "command": _entrypoint_command(fixture_dir, skill_dir / "run.sh", "--help"),
+            "expected": {"exit_code": 0},
+        }
+    else:
+        case = {
+            "name": "skill-contract-validation",
+            "type": "positive",
+            "command": _validator_command(fixture_dir, skill_dir),
+            "expected": {"exit_code": 0},
+        }
+
+    entrypoint_backed = case["name"] in {"sanity", "run-help"}
+    return {
+        "version": 2,
+        "skill": skill_name,
+        "eval_kind": "scaffold",
+        "trials": 3,
+        "proof_scope": "fixture wiring smoke" if entrypoint_backed else "static skill contract validation",
+        "claims": {
+            "proves": (
+                "the existing skill entrypoint exits with the expected status"
+                if entrypoint_backed
+                else "the skill contract can be parsed and checked by the best-practices-skills validator"
+            ),
+            "does_not_prove": "semantic correctness, live service behavior, or full skill readiness",
+        },
+        "cases": [case],
+    }
+
+
+def write_scaffold_fixture(skill_dir: Path, force: bool) -> dict[str, Any]:
+    target = skill_dir / "fixtures" / "agentic_eval.json"
+    if target.exists() and not force:
+        return {
+            "skill": skill_dir.name,
+            "status": "skipped",
+            "reason": "fixture_exists",
+            "path": str(target),
+        }
+    manifest = scaffold_manifest(skill_dir.resolve(), target.resolve().parent)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return {
+        "skill": skill_dir.name,
+        "status": "created",
+        "path": str(target),
+        "case": manifest["cases"][0]["name"],
+        "proof_scope": manifest["proof_scope"],
+    }
+
+
+def apply_scaffolds_report(
+    skills_root: Path,
+    validator: Path,
+    timeout_seconds: float,
+    write: bool,
+    force: bool,
+    limit: int | None,
+) -> dict[str, Any]:
+    audit = audit_skills_report(skills_root, validator, timeout_seconds)
+    eligible = [
+        item
+        for item in audit["skills"]
+        if item["recommended_action"]
+        in {
+            "scaffold_fixture",
+            "scaffold_static_validation_fixture",
+            "compose_agentic_evals_and_scaffold_fixture",
+            "compose_agentic_evals_and_scaffold_static_validation_fixture",
+        }
+    ]
+    selected = eligible[:limit] if limit is not None else eligible
+    results = []
+    for item in selected:
+        skill_dir = skills_root / item["skill"]
+        if not write:
+            results.append(
+                {
+                    "skill": item["skill"],
+                    "status": "dry_run",
+                    "path": str(skill_dir / "fixtures" / "agentic_eval.json"),
+                }
+            )
+            continue
+        try:
+            results.append(write_scaffold_fixture(skill_dir, force))
+        except Exception as exc:
+            logger.error("failed to scaffold {}: {}", item["skill"], exc)
+            results.append(
+                {
+                    "skill": item["skill"],
+                    "status": "error",
+                    "message": str(exc),
+                }
+            )
+
+    status_counts: dict[str, int] = {}
+    for result in results:
+        status = result["status"]
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "schema": "agentic_evals.scaffold_apply_report.v1",
+        "mocked": False,
+        "live": False,
+        "proof_scope": "fixture wiring scaffold application",
+        "claims": {
+            "proves": "which missing eval-posture skills had wiring fixtures created or would be created",
+            "does_not_prove": "semantic correctness, fixture pass status, live service behavior, or release readiness",
+        },
+        "skills_root": str(skills_root),
+        "write": write,
+        "force": force,
+        "limit": limit,
+        "summary": {
+            "eligible": len(eligible),
+            "selected": len(selected),
+            "created": status_counts.get("created", 0),
+            "skipped": status_counts.get("skipped", 0),
+            "dry_run": status_counts.get("dry_run", 0),
+            "errors": status_counts.get("error", 0),
+            "status_counts": status_counts,
+        },
+        "results": results,
+    }
+
+
+@app.command("run")
+def run(
+    manifest: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Optional path for the JSON report."),
+    timeout_seconds: float = typer.Option(30.0, "--timeout-seconds", min=0.1),
+    report_only: bool = typer.Option(
+        False,
+        "--report-only",
+        help="Emit the report and exit 0 even when required cases failed.",
+    ),
+    case: list[str] = typer.Option(
+        None, "--case",
+        help="Run ONLY the named case(s) from the manifest (repeatable). Focused "
+             "reruns skip the fixture-composition slop gate and score readiness "
+             "from the executed cases alone (agent-skills#1463/#1464/#1468).",
+    ),
+    only_category: str = typer.Option(
+        None, "--only-category",
+        help=(
+            "Run only the cases a category owns. Uses explicit case category/name without --map; "
+            "pass --map for a mapped close slice."
+        ),
+    ),
+    category_map: Path = typer.Option(None, "--map", help="category_map.v1 for --only-category."),
+) -> None:
+    """Run an agentic evaluation manifest.
+
+    Exits non-zero unless every required case reached READY. A runner that exits
+    0 on USABLE_WITH_GAPS lets an outer CI job go green over failed cases, which
+    is the failure this gate exists to prevent. Use --report-only when you want
+    the report without the gate.
+    """
+    only_cases = list(case or []) or None
+    if only_category:
+        manifest_doc = json.loads(manifest.read_text())
+        if category_map is None:
+            slice_names = [
+                c["name"] for c in manifest_doc.get("cases", [])
+                if only_category in {c.get("category"), c.get("category_id"), c.get("name")}
+            ]
+            if not slice_names:
+                raise typer.BadParameter(
+                    f"no cases explicitly match category {only_category!r}; "
+                    "pass --map for a mapped close slice"
+                )
+            only_cases = slice_names
+        else:
+            import remediation as rem
+
+            cmap = rem.load_category_map(category_map)
+            slice_names = [
+                c["name"] for c in manifest_doc.get("cases", [])
+                if only_category in rem._match_categories(c, cmap)
+            ]
+            if not slice_names:
+                raise typer.BadParameter(f"no cases match category {only_category!r}")
+            only_cases = slice_names
+    report = evaluate_manifest(manifest, timeout_seconds, only_cases=only_cases)
+    payload = json.dumps(report, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic: a killed run must not leave a half-written report that a
+        # downstream reader would parse as truth.
+        tmp = output.with_suffix(output.suffix + ".partial")
+        tmp.write_text(payload + "\n", encoding="utf-8")
+        os.replace(tmp, output)
+    typer.echo(payload)
+    if report["readiness"] != "READY" and not report_only:
+        failed = [c["name"] for c in report["cases"] if c["outcome"] != OUTCOME_PASS and c["required"]]
+        logger.error(
+            "readiness={} required_not_passing={}", report["readiness"], ", ".join(failed) or "none"
+        )
+        raise typer.Exit(1)
+
+
+@app.command("validate")
+def validate(
+    manifest: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+) -> None:
+    """Validate a fixture WITHOUT executing any case (agent-skills#1465).
+
+    Full schema, claims, seams, evidence-class, and slop validation -- exactly
+    what run performs before its first case -- then exit. Nonzero with the
+    problem list on a broken fixture; zero on a valid one.
+    """
+    m = load_manifest(manifest)
+    typer.echo(f"VALID: {manifest} ({len(m['cases'])} cases, trials={m.get('trials')})")
+
+
+@app.command("plan-journeys")
+def plan_journeys(
+    fixture: Path = typer.Option(..., "--fixture", exists=True, dir_okay=False, readable=True),
+    requirements: Path = typer.Option(..., "--requirements", exists=True, dir_okay=False, readable=True),
+    interaction_inventory: Path = typer.Option(..., "--interaction-inventory", exists=True, dir_okay=False),
+    state_graph: Path = typer.Option(..., "--state-graph", exists=True, dir_okay=False),
+    output: Path = typer.Option(..., "--output"),
+    scaffold_output: Path | None = typer.Option(None, "--scaffold-output", help="Optional candidate test-interactions manifest fragment."),
+    report_only: bool = typer.Option(False, "--report-only", help="Exit 0 even with unbound/uncovered critical requirements."),
+) -> None:
+    """Bind declared requirements to live test-interactions discovery (agent-skills#1629).
+
+    Emits agentic_evals.journey_plan.v1. A required flow discovery cannot see
+    stays visible as UNBOUND; validation and reference errors fail closed with
+    exit 3. Without --report-only, exit 1 when any critical requirement is not
+    cleanly bound or any critical claim has no journey. Binding is planning,
+    never proof: this command cannot emit PROVEN or READY.
+    """
+    import journeys as journeys_mod
+
+    plan, errors = journeys_mod.plan_journeys_files(
+        fixture_path=fixture,
+        requirements_path=requirements,
+        inventory_path=interaction_inventory,
+        state_graph_path=state_graph,
+        output_path=output,
+        scaffold_output=scaffold_output,
+    )
+    if errors:
+        for err in errors:
+            typer.echo(f"INVALID: {err}", err=True)
+        raise typer.Exit(3)
+    assert plan is not None
+    summary = plan["summary"]
+    typer.echo(json.dumps(summary, indent=2))
+    typer.echo(f"PLAN: {output}")
+    critical_gaps = summary["missing_critical_journeys"] + sum(
+        1
+        for j in plan["journeys"]
+        if j["criticality"] == "critical" and not j["coverage_satisfiable"]
+    )
+    if critical_gaps and not report_only:
+        typer.echo(f"NOT COVERED: {critical_gaps} critical gap(s); see plan.", err=True)
+        raise typer.Exit(1)
+
+
+@app.command("apply-scaffolds")
+def apply_scaffolds(
+    skills_root: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Optional path for the JSON report."),
+    validator: Path | None = typer.Option(None, "--validator", help="Path to validate_skill.py."),
+    timeout_seconds: float = typer.Option(10.0, "--timeout-seconds", min=0.1),
+    write: bool = typer.Option(False, "--write", help="Create missing fixtures. Default is dry-run."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing generated fixtures."),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Maximum scaffoldable skills to process."),
+) -> None:
+    """Create first-pass fixtures for skills whose audit action is scaffold_fixture."""
+    resolved_root = skills_root.resolve()
+    resolved_validator = (
+        validator.resolve()
+        if validator is not None
+        else (Path(__file__).resolve().parents[2] / "best-practices-skills" / "scripts" / "validate_skill.py")
+    )
+    report = apply_scaffolds_report(resolved_root, resolved_validator, timeout_seconds, write, force, limit)
+    payload = json.dumps(report, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(payload + "\n", encoding="utf-8")
+    typer.echo(payload)
+
+
+@app.command("scaffold-fixture")
+def scaffold_fixture(
+    skill_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Path for the generated fixture."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing fixture."),
+) -> None:
+    """Create a first-pass agentic eval fixture from a skill entrypoint."""
+    target = output or (skill_dir / "fixtures" / "agentic_eval.json")
+    manifest = scaffold_manifest(skill_dir.resolve(), target.resolve().parent)
+    if target.exists() and not force:
+        raise typer.BadParameter(f"{target} already exists; pass --force to overwrite")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(manifest, indent=2) + "\n"
+    target.write_text(payload, encoding="utf-8")
+    typer.echo(payload)
+
+
+@app.command("audit-skills")
+def audit_skills(
+    skills_root: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Optional path for the JSON report."),
+    validator: Path | None = typer.Option(None, "--validator", help="Path to validate_skill.py."),
+    timeout_seconds: float = typer.Option(10.0, "--timeout-seconds", min=0.1),
+) -> None:
+    """Audit top-level skills for an explicit agentic eval posture."""
+    resolved_root = skills_root.resolve()
+    resolved_validator = (
+        validator.resolve()
+        if validator is not None
+        else (Path(__file__).resolve().parents[2] / "best-practices-skills" / "scripts" / "validate_skill.py")
+    )
+    report = audit_skills_report(resolved_root, resolved_validator, timeout_seconds)
+    payload = json.dumps(report, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(payload + "\n", encoding="utf-8")
+    typer.echo(payload)
+
+
+regressions_app = typer.Typer(no_args_is_help=True, help="Incident -> retained regression lifecycle (#1447).")
+coverage_app = typer.Typer(no_args_is_help=True, help="Risk-based seam-coverage sufficiency audit (#1448).")
+app.add_typer(regressions_app, name="regressions")
+app.add_typer(coverage_app, name="coverage")
+
+
+def _emit(report: dict[str, Any], output: Path | None) -> None:
+    payload = json.dumps(report, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        tmp = output.with_suffix(output.suffix + ".partial")
+        tmp.write_text(payload + "\n", encoding="utf-8")
+        os.replace(tmp, output)
+    typer.echo(payload)
+
+
+@regressions_app.command("audit")
+def regressions_audit(
+    skills_root: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o"),
+    freshness_days: int = typer.Option(regressions_mod.DEFAULT_FRESHNESS_DAYS, "--freshness-days", min=1),
+) -> None:
+    """Audit every skill's regression registry: unprotected, vacuous, stale, unmapped."""
+    now = regressions_mod.now_utc()
+    root = skills_root.resolve()
+    skills = sorted(p for p in root.iterdir() if (p / "SKILL.md").exists())
+    reports = [regressions_mod.audit_skill(s, now, freshness_days) for s in skills]
+    with_registry = [r for r in reports if r["has_registry"]]
+    report = {
+        "schema": "agentic_evals.regressions_audit.v1",
+        "mocked": False,
+        "live": False,
+        "proof_scope": "static incident-regression registry audit",
+        "skills_root": str(root),
+        "generated_at": now.isoformat(),
+        "freshness_days": freshness_days,
+        "summary": {
+            "skills_with_registry": len(with_registry),
+            "total_regressions": sum(r["summary"]["total"] for r in with_registry),
+            "unprotected": sum(r["summary"].get("unprotected", 0) for r in with_registry),
+            "never_proven_fail_before_fix": sum(
+                r["summary"].get("never_proven_fail_before_fix", 0) for r in with_registry
+            ),
+            "stale_live_proof": sum(r["summary"].get("stale_live_proof", 0) for r in with_registry),
+            "unmapped_incidents": sum(r["summary"].get("unmapped_incidents", 0) for r in with_registry),
+        },
+        "skills": with_registry,
+    }
+    _emit(report, output)
+
+
+@regressions_app.command("show")
+def regressions_show(
+    skill_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o"),
+    freshness_days: int = typer.Option(regressions_mod.DEFAULT_FRESHNESS_DAYS, "--freshness-days", min=1),
+) -> None:
+    """Show one skill's regression registry audit."""
+    _emit(regressions_mod.audit_skill(skill_dir.resolve(), regressions_mod.now_utc(), freshness_days), output)
+
+
+@regressions_app.command("verify")
+def regressions_verify(
+    skill_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o"),
+    timeout_seconds: float = typer.Option(120.0, "--timeout-seconds", min=0.1),
+    report_only: bool = typer.Option(False, "--report-only"),
+) -> None:
+    """Re-run each regression's fail-before-fix proof and confirm non-vacuity.
+
+    Exits non-zero if any ACTIVE regression's guard fails to demonstrate
+    fail-before-fix behaviour, unless --report-only.
+    """
+    resolved = skill_dir.resolve()
+    registry = regressions_mod.load_registry(resolved)
+    if registry is None:
+        raise typer.BadParameter(f"no regression registry at {regressions_mod.registry_path(resolved)}")
+    problems = regressions_mod.validate_registry(registry)
+    if problems:
+        raise typer.BadParameter("; ".join(problems))
+    results = []
+    for rec in registry.get("regressions", []):
+        if rec.get("status") != regressions_mod.STATUS_ACTIVE:
+            continue
+        results.append(regressions_mod.verify_regression(resolved, rec, timeout_seconds))
+    unproven = [r for r in results if r["fail_before_fix_verified"] is False]
+    report = {
+        "schema": "agentic_evals.regressions_verify.v1",
+        "skill": resolved.name,
+        "generated_at": regressions_mod.now_utc().isoformat(),
+        "verified": sum(1 for r in results if r["fail_before_fix_verified"] is True),
+        "unproven": len(unproven),
+        "no_proof_command": sum(1 for r in results if r["fail_before_fix_verified"] is None),
+        "results": results,
+    }
+    _emit(report, output)
+    if unproven and not report_only:
+        logger.error("regressions with un-proven fail-before-fix: {}", ", ".join(r["regression_id"] for r in unproven))
+        raise typer.Exit(1)
+
+
+@coverage_app.command("audit")
+def coverage_audit(
+    skills_root: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o"),
+) -> None:
+    """Audit seam-coverage sufficiency across skills that declare seams."""
+    _emit(coverage_mod.audit_root(skills_root.resolve(), regressions_mod.now_utc()), output)
+
+
+@coverage_app.command("show")
+def coverage_show(
+    skill_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    output: Path | None = typer.Option(None, "--output", "-o"),
+) -> None:
+    """Show one skill's seam-coverage sufficiency audit."""
+    _emit(coverage_mod.audit_skill(skill_dir.resolve(), regressions_mod.now_utc()), output)
+
+
+@app.command("schema")
+def schema() -> None:
+    """Print the report schema identifier."""
+    typer.echo("agentic_evals.report.v2")
+
+
+@app.command("categorize")
+def categorize_cmd(
+    report_path: Path = typer.Argument(..., help="agentic_evals.report.v2 JSON"),
+    category_map: Path = typer.Option(..., "--map", help="agentic_evals.category_map.v1 JSON"),
+    map_version: str = typer.Option("0", "--map-version"),
+    output: Path = typer.Option(None, "--output"),
+) -> None:
+    """Assign a report's COMPLETE failing set to stable category_ids (remediation
+    loop; REMEDIATION_LOOP.md). Unclassified/ambiguous failures are hard errors."""
+    import remediation as rem
+
+    report = json.loads(report_path.read_text())
+    cmap = rem.load_category_map(category_map)
+    try:
+        categorized = rem.categorize(report, cmap)
+    except rem.CategorizationError as exc:
+        typer.echo(json.dumps({"ok": False, "error": str(exc)}))
+        raise typer.Exit(1) from exc
+    semantic = rem.semantic_fingerprint(categorized, map_version)
+    result = {
+        "ok": True,
+        "schema": "agentic_evals.categorization.v1",
+        **categorized,
+        "semantic_fingerprint": semantic,
+    }
+    rendered = json.dumps(result, indent=2)
+    typer.echo(rendered)
+    if output:
+        output.write_text(rendered + "\n")
+
+
+@app.command("remediate-loop")
+def remediate_loop_cmd(
+    manifest: Path = typer.Argument(..., exists=True, dir_okay=False, help="the eval fixture"),
+    category_map: Path = typer.Option(..., "--map"),
+    route: str = typer.Option("backend_python_or_skill_runtime", "--route"),
+    evaluated_sha: str = typer.Option("unknown", "--evaluated-sha"),
+    timeout_seconds: float = typer.Option(30.0, "--timeout-seconds", min=0.1),
+    max_iterations: int = typer.Option(10, "--max-iterations", min=1),
+    no_progress_k: int = typer.Option(3, "--no-progress-k", min=1),
+    wait_seconds: int = typer.Option(0, "--wait-seconds", help="Per-iteration wait for ticket closures (0=preview/no wait)."),
+    execute: bool = typer.Option(False, "--execute", help="Actually file tickets each iteration (default: preview single pass)."),
+    output: Path = typer.Option(None, "--output"),
+) -> None:
+    """Run-until-green outer loop (REMEDIATION_LOOP.md): full run → categorize →
+    (green? stop) → fingerprint → oscillation/no-progress/budget termination →
+    file/reconcile tickets → wait for campaign progress → repeat. Preview by
+    default runs a single pass with no GitHub mutation and no wait."""
+    import remediation as rem
+
+    cmap = rem.load_category_map(category_map)
+    map_version = str(cmap.get("map_version", "0"))
+
+    def run_fn() -> dict[str, Any]:
+        return evaluate_manifest(manifest, timeout_seconds, only_cases=None)
+
+    def categorize_fn(report: dict[str, Any]) -> dict[str, Any]:
+        return rem.categorize(report, cmap)
+
+    def iterate_fn(report: dict[str, Any], categorized: dict[str, Any]) -> None:
+        active = set(categorized["active_category_ids"])
+        induced = rem.validate_category_map(cmap, active_category_ids=active)
+        chart = rem.render_and_validate_dag(rem.active_category_dag(induced, cmap))
+        if not chart["ok"]:
+            raise typer.Exit(1)
+        open_labels = rem.open_ticket_labels(str(cmap["repo"])) if execute else set()
+        plan = rem.plan_remediation(categorized, induced, cmap, open_labels=open_labels)
+        rem.apply_plan(plan, fixture=str(manifest), route=route, execute=execute)
+
+    def wait_fn(active_ids: list[str]) -> None:
+        # Live campaign progress is the watchdog closing the category tickets.
+        # Preview (wait_seconds=0 / not execute) does not wait — a single pass.
+        if not execute or wait_seconds <= 0:
+            return
+        _wait_for_ticket_progress(str(cmap["repo"]), active_ids, cmap, wait_seconds)
+
+    # Preview: a single pass so an operator sees the plan without an infinite
+    # unattended loop. --execute runs the real bounded loop.
+    effective_max = max_iterations if execute else 1
+    result = rem.remediate_loop(
+        run_fn=run_fn, categorize_fn=categorize_fn, iterate_fn=iterate_fn, wait_fn=wait_fn,
+        map_version=map_version, max_iterations=effective_max, no_progress_k=no_progress_k,
+    )
+    result["executed"] = execute
+    result["evaluated_sha"] = evaluated_sha
+    typer.echo(json.dumps(result, indent=2))
+    if output:
+        output.write_text(json.dumps(result, indent=2) + "\n")
+    if result["status"] != "GREEN":
+        raise typer.Exit(1)
+
+
+def _wait_for_ticket_progress(repo: str, active_ids: list[str], cmap: dict, wait_seconds: int) -> None:
+    """Block until the active categories' tickets leave the open pool, or a
+    bounded timeout. Campaign progress, not 'all closed' — any terminal change
+    unblocks the next full re-run (which is the real reconcile gate)."""
+    import remediation as rem
+
+    labels = {e["category_id"]: e["label"] for e in cmap["categories"].values()}
+    watch = {labels[c] for c in active_ids if c in labels}
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        still_open = rem.open_ticket_labels(repo) & watch
+        if not still_open:
+            return
+        time.sleep(min(30, max(5, wait_seconds // 10)))
+
+
+@app.command("remediate")
+def remediate_cmd(
+    report_path: Path = typer.Argument(..., help="agentic_evals.report.v2 JSON (a COMPLETE run)"),
+    category_map: Path = typer.Option(..., "--map"),
+    fixture: str = typer.Option(..., "--fixture", help="fixture path (for repro/proof commands)"),
+    route: str = typer.Option("backend_python_or_skill_runtime", "--route"),
+    evaluated_sha: str = typer.Option("unknown", "--evaluated-sha"),
+    execute: bool = typer.Option(False, "--execute", help="Actually file tickets (default: preview)."),
+    output: Path = typer.Option(None, "--output"),
+) -> None:
+    """One remediation iteration: categorize a COMPLETE report → REQUIRED phart
+    visualization + acyclicity gate → validated atomic ticket+depends-on plan →
+    preview (default) or `--execute` file via /ticket. Campaign-frozen; the outer
+    run-until-green loop wraps this (REMEDIATION_LOOP.md)."""
+    import remediation as rem
+
+    report = json.loads(report_path.read_text())
+    cmap = rem.load_category_map(category_map)
+    try:
+        categorized = rem.categorize(report, cmap)
+    except rem.CategorizationError as exc:
+        typer.echo(json.dumps({"ok": False, "error": str(exc)}))
+        raise typer.Exit(1) from exc
+
+    if not categorized["active_category_ids"]:
+        typer.echo(json.dumps({"ok": True, "green": True, "message": "no active categories"}, indent=2))
+        return
+
+    active = set(categorized["active_category_ids"])
+    try:
+        induced = rem.validate_category_map(cmap, active_category_ids=active)
+    except rem.CategoryMapError as exc:
+        typer.echo(json.dumps({"ok": False, "error": f"category map invalid: {exc}"}))
+        raise typer.Exit(1) from exc
+
+    # REQUIRED visualization + acyclicity gate: no plan may proceed if invalid.
+    dag = rem.active_category_dag(induced, cmap)
+    chart = rem.render_and_validate_dag(dag)
+    if not chart["ok"]:
+        typer.echo(json.dumps({"ok": False, "error": "active category DAG invalid", "phart": chart}, indent=2))
+        raise typer.Exit(1)
+
+    map_version = str(cmap.get("map_version", "0"))
+    semantic = rem.semantic_fingerprint(categorized, map_version)
+    provenance = rem.provenance_fingerprint(
+        semantic, evaluated_sha=evaluated_sha,
+        frozen_inputs={"category_map": rem._hash(cmap), "map_version": map_version},
+    )
+    open_labels = rem.open_ticket_labels(str(cmap["repo"])) if execute else set()
+    plan = rem.plan_remediation(categorized, induced, cmap, open_labels=open_labels)
+    applied = rem.apply_plan(plan, fixture=fixture, route=route, execute=execute)
+
+    result = {
+        "ok": True,
+        "schema": "agentic_evals.remediation_iteration.v1",
+        "executed": execute,
+        "semantic_fingerprint": semantic,
+        "provenance_fingerprint": provenance,
+        "active_category_ids": categorized["active_category_ids"],
+        "category_dag_chart": chart["chart"],
+        "plan": plan,
+        "apply": applied,
+    }
+    typer.echo(json.dumps(result, indent=2))
+    if output:
+        output.write_text(json.dumps(result, indent=2) + "\n")
+
+
+@app.command("category-dag")
+def category_dag_cmd(
+    report_path: Path = typer.Argument(..., help="agentic_evals.report.v2 JSON"),
+    category_map: Path = typer.Option(..., "--map"),
+    output: Path = typer.Option(None, "--output", help="write the phart ASCII chart here"),
+) -> None:
+    """Emit + validate + render the ACTIVE category dependency DAG through
+    phart-dag-chart (REQUIRED on any failing run; the acyclicity gate). Exits
+    non-zero if the active DAG is invalid, so no `ticket block` may proceed."""
+    import remediation as rem
+
+    report = json.loads(report_path.read_text())
+    cmap = rem.load_category_map(category_map)
+    categorized = rem.categorize(report, cmap)
+    active = set(categorized["active_category_ids"])
+    try:
+        induced = rem.validate_category_map(cmap, active_category_ids=active)
+    except rem.CategoryMapError as exc:
+        typer.echo(json.dumps({"ok": False, "error": str(exc)}))
+        raise typer.Exit(1) from exc
+    dag = rem.active_category_dag(induced, cmap)
+    rendered = rem.render_and_validate_dag(dag)
+    if rendered["ok"]:
+        typer.echo(rendered["chart"])
+        if output:
+            output.write_text(rendered["chart"])
+    else:
+        typer.echo(json.dumps({"ok": False, "phart": rendered}, indent=2))
+        raise typer.Exit(1)
+
+
+if __name__ == "__main__":
+    app()

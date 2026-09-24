@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.arena_maker_intent.v1",
+  "title": "Battle arena-maker intent v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "arena_goal",
+    "why_this_arena",
+    "threat_hypothesis",
+    "red_mission",
+    "blue_mission",
+    "expected_red_behaviors",
+    "expected_blue_behaviors",
+    "protected_invariants",
+    "success_signals",
+    "failure_signals",
+    "out_of_scope",
+    "selection_rationale",
+    "difficulty_rationale"
+  ],
+  "properties": {
+    "schema": {"const": "battle.arena_maker_intent.v1"},
+    "arena_goal": {"type": "string", "minLength": 1},
+    "why_this_arena": {"type": "string", "minLength": 1},
+    "threat_hypothesis": {"type": "string", "minLength": 1},
+    "red_mission": {"type": "string", "minLength": 1},
+    "blue_mission": {"type": "string", "minLength": 1},
+    "expected_red_behaviors": {"$ref": "#/$defs/non_empty_string_list"},
+    "expected_blue_behaviors": {"$ref": "#/$defs/non_empty_string_list"},
+    "protected_invariants": {"$ref": "#/$defs/non_empty_string_list"},
+    "success_signals": {"$ref": "#/$defs/non_empty_string_list"},
+    "failure_signals": {"$ref": "#/$defs/non_empty_string_list"},
+    "out_of_scope": {"$ref": "#/$defs/non_empty_string_list"},
+    "selection_rationale": {"type": "string", "minLength": 1},
+    "difficulty_rationale": {"type": "string", "minLength": 1},
+    "operational_bindings": {
+      "type": "object",
+      "required": ["schema"],
+      "properties": {
+        "schema": {"const": "battle.arena_maker_intent.operational_bindings.v1"},
+        "battle_id": {"type": "string", "minLength": 1},
+        "target_identity": {"type": "string", "minLength": 1},
+        "authorization_manifest_sha256": {"type": "string", "minLength": 1},
+        "arena_contract_sha256": {"type": "string", "minLength": 1},
+        "runtime_mode": {"type": "string", "minLength": 1},
+        "score_authority": {"const": "judge_and_scorekeeper_receipts_only"},
+        "judge_authority": {"const": "independent_replay_receipts_required"},
+        "dispatch_policy": {"const": "freeze_intent_before_red_blue_or_judge_dispatch"},
+        "round_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "synthesized_from_legacy": {"const": true}
+  },
+  "$defs": {
+    "non_empty_string_list": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "additionalProperties": false
+}

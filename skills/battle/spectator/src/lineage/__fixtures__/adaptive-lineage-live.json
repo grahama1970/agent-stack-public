@@ -1,0 +1,199 @@
+{
+  "battle_id": "battle-004",
+  "data_source": "live",
+  "edges": [
+    {
+      "changed_dimensions": [
+        {
+          "child": "importlib_spec_from_file",
+          "dimension": "app_load_mode",
+          "parent": "from_import_app"
+        },
+        {
+          "child": "none",
+          "dimension": "target_call_form",
+          "parent": "function_call"
+        }
+      ],
+      "delta_status": "PASS",
+      "from": "G0",
+      "mutation_operator": "method_replace",
+      "novelty_distance": 2,
+      "to": "G1-A"
+    },
+    {
+      "changed_dimensions": [
+        {
+          "child": "zipfile_write_arcname",
+          "dimension": "archive_entry_construction",
+          "parent": "zipfile_writestr"
+        }
+      ],
+      "delta_status": "PASS",
+      "from": "G0",
+      "mutation_operator": "oracle_or_parameter_mutation",
+      "novelty_distance": 1,
+      "to": "G1-B"
+    },
+    {
+      "changed_dimensions": [
+        {
+          "child": "from_import_app",
+          "dimension": "app_load_mode",
+          "parent": "importlib_spec_from_file"
+        },
+        {
+          "child": "zipinfo",
+          "dimension": "archive_entry_construction",
+          "parent": "zipfile_writestr"
+        },
+        {
+          "child": "function_call",
+          "dimension": "target_call_form",
+          "parent": "none"
+        },
+        {
+          "child": "try[Exception:return|UnicodeDecodeError:handle|ValueError:return]",
+          "dimension": "exception_handling",
+          "parent": "try[Exception:return|ValueError:handle]"
+        }
+      ],
+      "delta_status": "PASS",
+      "from": "G1-A",
+      "mutation_operator": "failure_guided_crossover",
+      "novelty_distance": 4,
+      "to": "G2"
+    }
+  ],
+  "generated_at": null,
+  "nodes": [
+    {
+      "changed_dimensions": [],
+      "delta_status": null,
+      "fitness_status": null,
+      "generation": 0,
+      "id": "G0",
+      "judge_outcome": null,
+      "mutation_operator": null,
+      "novelty_distance": null,
+      "parentId": null,
+      "role": "seed",
+      "runner_up": false,
+      "selected": false,
+      "technique_delta": "seed exploit (no mutation operator)"
+    },
+    {
+      "changed_dimensions": [
+        {
+          "child": "importlib_spec_from_file",
+          "dimension": "app_load_mode",
+          "parent": "from_import_app"
+        },
+        {
+          "child": "none",
+          "dimension": "target_call_form",
+          "parent": "function_call"
+        }
+      ],
+      "delta_status": "PASS",
+      "fitness_status": "PASS",
+      "generation": 1,
+      "id": "G1-A",
+      "judge_outcome": {
+        "duration_seconds": 1.840882,
+        "patched_bypass": false,
+        "vulnerable_original_confirmed": true
+      },
+      "mutation_operator": "method_replace",
+      "novelty_distance": 2,
+      "parentId": "G0",
+      "role": "candidate",
+      "runner_up": false,
+      "selected": true,
+      "technique_delta": "Replaced static from app import import_zip with importlib.util.spec_from_file_location dynamic loading; archive construction, traversal path, call, and oracle remain unchanged."
+    },
+    {
+      "changed_dimensions": [
+        {
+          "child": "zipfile_write_arcname",
+          "dimension": "archive_entry_construction",
+          "parent": "zipfile_writestr"
+        }
+      ],
+      "delta_status": "PASS",
+      "fitness_status": "PASS",
+      "generation": 1,
+      "id": "G1-B",
+      "judge_outcome": {
+        "duration_seconds": 1.866969,
+        "patched_bypass": false,
+        "vulnerable_original_confirmed": true
+      },
+      "mutation_operator": "oracle_or_parameter_mutation",
+      "novelty_distance": 1,
+      "parentId": "G0",
+      "role": "candidate",
+      "runner_up": true,
+      "selected": false,
+      "technique_delta": "Changed malicious archive member construction from zf.writestr('../arena_escape.txt', data) to zf.write(real_payload_file, arcname='../arena_escape.txt') while preserving the direct import_zip call and outside-destination oracle."
+    },
+    {
+      "changed_dimensions": [
+        {
+          "child": "from_import_app",
+          "dimension": "app_load_mode",
+          "parent": "importlib_spec_from_file"
+        },
+        {
+          "child": "zipinfo",
+          "dimension": "archive_entry_construction",
+          "parent": "zipfile_writestr"
+        },
+        {
+          "child": "function_call",
+          "dimension": "target_call_form",
+          "parent": "none"
+        },
+        {
+          "child": "try[Exception:return|UnicodeDecodeError:handle|ValueError:return]",
+          "dimension": "exception_handling",
+          "parent": "try[Exception:return|ValueError:handle]"
+        }
+      ],
+      "delta_status": "PASS",
+      "fitness_status": "PASS",
+      "generation": 2,
+      "id": "G2",
+      "judge_outcome": {
+        "duration_seconds": 1.767863,
+        "patched_bypass": false,
+        "vulnerable_original_confirmed": true
+      },
+      "mutation_operator": "failure_guided_crossover",
+      "novelty_distance": 4,
+      "parentId": "G1-A",
+      "role": "descendant",
+      "runner_up": false,
+      "selected": false,
+      "technique_delta": "Replaces parent dynamic importlib loading with static local import, replaces writestr archive construction with ZipInfo plus open/write, calls import_zip with Path objects, and uses a read-back outside-directory oracle."
+    }
+  ],
+  "qualification": {
+    "reasons": [],
+    "status": "PASS",
+    "stop_condition": null
+  },
+  "run_id": "arena-adaptive-lineage-20260823T153108Z",
+  "schema": "battle.adaptive_lineage_mechanics_fixture.v1",
+  "selection": {
+    "deciding_criterion": "novelty_distance",
+    "runner_up_id": "G1-B",
+    "selected_id": "G1-A"
+  },
+  "source": {
+    "qualification_receipt_schema": "battle.adaptive_lineage_qualification.v1",
+    "qualification_receipt_sha256": "b9cb13da928de4d4f4efc27043398fb8f5ed55db05f0bea7d4972c302fecb577",
+    "qualification_receipt_status": "PASS",
+    "schema": "battle.adaptive_lineage_mechanics_fixture_source.v1"
+  }
+}

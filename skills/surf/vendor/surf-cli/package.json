@@ -1,0 +1,74 @@
+{
+  "name": "surf-cli",
+  "version": "2.9.0",
+  "description": "CLI for AI agents to control Chrome. Zero config, agent-agnostic, battle-tested.",
+  "keywords": [
+    "chrome",
+    "browser",
+    "automation",
+    "ai",
+    "agent",
+    "cli",
+    "cdp",
+    "devtools"
+  ],
+  "author": "Nico Bailon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nicobailon/surf-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nicobailon/surf-cli/issues"
+  },
+  "homepage": "https://github.com/nicobailon/surf-cli#readme",
+  "type": "module",
+  "bin": {
+    "surf": "native/cli.cjs"
+  },
+  "files": [
+    "native/",
+    "scripts/",
+    "dist/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "vite build --watch --mode development",
+    "build": "vite build",
+    "check": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "lint:test": "biome check test/",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "test:e2e:chrome": "node test/e2e/real-chrome.mjs",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest --ui",
+    "install:native": "node scripts/install-native-host.cjs",
+    "uninstall:native": "node scripts/uninstall-native-host.cjs"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@typesafe-ai/sdk": "0.6.0",
+    "buffer": "^6.0.3",
+    "crypto-browserify": "^3.12.1",
+    "events": "^3.3.0",
+    "stream-browserify": "^3.0.0",
+    "vite-plugin-node-polyfills": "^0.28.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.4",
+    "@types/chrome": "^0.2.2",
+    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/ui": "^4.1.9",
+    "puppeteer": "25.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4",
+    "vitest": "^4.1.9"
+  }
+}

@@ -1,0 +1,91 @@
+import { isBattleProofCardView } from "../lib/battle-proof-card-registry";
+import { isBattleReceiptReplayView } from "../lib/battle-receipt-replay";
+import { isBattleDesignView } from "../lib/battle-mockup-lanes";
+import { isBattleSynthesisView } from "../lib/battle-synthesis-registry";
+import { isBattleCompileView } from "../lib/battle-compile-registry";
+import { isBattleRuntimeView } from "../lib/battle-runtime-registry";
+import { isBattlePopulationView } from "../lib/battle-population-registry";
+import { isBattleLiveView } from "../lib/battle-transport-registry";
+import { isBattleCampaignView } from "../lib/battle-campaign-registry";
+import { isBattleMusicView } from "../lib/battle-music-registry";
+
+export function BattleProofNav() {
+	const hash = typeof window !== "undefined" ? window.location.hash : "";
+	const onProof = isBattleProofCardView(hash);
+	const onSynthesis = isBattleSynthesisView(hash);
+	const onCompile = isBattleCompileView(hash);
+	const onRuntime = isBattleRuntimeView(hash);
+	const onPopulation = isBattlePopulationView(hash);
+	const onLive = isBattleLiveView(hash);
+	const onCampaign = isBattleCampaignView(hash);
+	const onMusic = isBattleMusicView(hash);
+	const onGenetic = hash.includes("pr6-genetic") && !onCampaign;
+	const onAdaptive = hash.includes("adaptive-lineage-v13");
+	const onDesign = isBattleDesignView();
+	const onProofFamily = onProof || onSynthesis || onCompile || onRuntime || onPopulation || onGenetic || onAdaptive || onCampaign || onMusic || onLive;
+	const onRace = !onDesign && !onProofFamily && (isBattleReceiptReplayView() || hash.startsWith("#battle/receipt"));
+
+	return (
+		<nav className="battle-proof-nav" aria-label="Battle views" data-qid="battle:proof-card:nav">
+			<a href="#battle/receipt?engine=pixi" aria-current={onRace ? "page" : undefined} data-qid="battle:nav:race" data-qs-action="BATTLE_NAV_RACE" title="Open receipt-backed adaptive replay">
+				Adaptive Replay
+			</a>
+			<a href="#battle" aria-current={onDesign ? "page" : undefined} data-qid="battle:nav:design" data-qs-action="BATTLE_NAV_DESIGN" title="Dense design-parity mockup (not receipt truth)">
+				Design
+			</a>
+			<details className="battle-proof-nav-more" data-qid="battle:nav:proofs-menu">
+				<summary className={onProofFamily ? "is-active" : undefined}>Proofs &amp; stages</summary>
+				<div className="battle-proof-nav-more-links">
+					<a
+						href="#battle/receipt?engine=pixi&fixture=battle-004-adaptive-lineage-v13"
+						aria-current={onAdaptive ? "page" : undefined}
+						data-qid="battle:nav:adaptive"
+						data-qs-action="BATTLE_NAV_ADAPTIVE"
+						title="Single-run causal Red/Blue parent-child lineage"
+					>
+						Adaptive Lineage V13
+					</a>
+					<a
+						href="#battle/receipt?engine=pixi&fixture=battle-004-pr6-genetic-pixi"
+						aria-current={onGenetic ? "page" : undefined}
+						data-qid="battle:nav:genetic"
+						data-qs-action="BATTLE_NAV_GENETIC"
+						title="Composite demonstration — causal continuity not proven"
+					>
+						Genetic Pixi (legacy composite)
+					</a>
+					<a
+						href="#battle/campaign?engine=pixi&fixture=battle-004-pr6-genetic-pixi"
+						aria-current={onCampaign ? "page" : undefined}
+						data-qid="battle:nav:campaign"
+						data-qs-action="BATTLE_NAV_CAMPAIGN"
+						title="Campaign story over composite genetic fixture"
+					>
+						Campaign (composite)
+					</a>
+					<a href="#battle/music?fixture=battle-004-music-runtime" aria-current={onMusic ? "page" : undefined} data-qid="battle:nav:music" data-qs-action="BATTLE_NAV_MUSIC" title="Open receipt-backed music schedule">
+						Music Schedule
+					</a>
+					<a href="#battle/live?engine=pixi&battle=battle-004" aria-current={onLive ? "page" : undefined} data-qid="battle:nav:live" data-qs-action="BATTLE_NAV_LIVE" title="Open live transport view">
+						Live Transport
+					</a>
+					<a href="#battle/proof?fixture=battle-004-pr3b" aria-current={onProof ? "page" : undefined} data-qid="battle:nav:proof" data-qs-action="BATTLE_NAV_PROOF" title="Open research and genome proof">
+						Research &amp; Genome Proof
+					</a>
+					<a href="#battle/synthesis?fixture=battle-004-pr3c" aria-current={onSynthesis ? "page" : undefined} data-qid="battle:nav:synthesis" data-qs-action="BATTLE_NAV_SYNTHESIS" title="Open provider synthesis proof">
+						Provider Synthesis
+					</a>
+					<a href="#battle/compile?fixture=battle-004-pr3d" aria-current={onCompile ? "page" : undefined} data-qid="battle:nav:compile" data-qs-action="BATTLE_NAV_COMPILE" title="Open compile timeline proof">
+						Compile Timeline
+					</a>
+					<a href="#battle/runtime?fixture=battle-004-pr4" aria-current={onRuntime ? "page" : undefined} data-qid="battle:nav:runtime" data-qs-action="BATTLE_NAV_RUNTIME" title="Open runtime and Judge proof">
+						Runtime &amp; Judge
+					</a>
+					<a href="#battle/population?fixture=battle-004-pr5-population" aria-current={onPopulation ? "page" : undefined} data-qid="battle:nav:population" data-qs-action="BATTLE_NAV_POPULATION" title="Open population proof">
+						Population
+					</a>
+				</div>
+			</details>
+		</nav>
+	);
+}

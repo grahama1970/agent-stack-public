@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Append one turn to a run's conversation, durably (#1210).
+
+The chat pane reads `conversation.jsonl` and nothing has ever written it. So a
+discussion about a dream lives exactly as long as the browser tab: it cannot
+survive a reload, cannot be reviewed later, and cannot feed tomorrow's recall.
+That is the open joint in the loop -- the journal reaches a person, and nothing
+the person says gets back.
+
+Append-only on purpose. A conversation is a record of what was said, and
+rewriting it later would make the record worth less than not keeping one.
+Every turn is appended with `O_APPEND` under an exclusive lock, so two writers
+(a human in one terminal, an agent in another) cannot interleave a half-line.
+
+An `embry` turn carries more than a human turn, and the asymmetry is deliberate.
+When she says something it must be bound the same way her journal is: a
+requested delivery tone, and a reference to the audio that was actually
+rendered. Her journal is hash-bound to its spoken text; a claim she said
+something, with no audio and no tone, would be a weaker artifact than the thing
+it is commenting on.
+
+This command does NOT itself write the conversation back into memory. The
+separate `carry-conversation` step owns that return arc and proves each carried
+turn by read-back from Memory. Keeping append and carry separate prevents a
+browser/chat write from silently becoming autobiographical memory without the
+conversation boundary receipt.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parents[1]
+
+#: Who can speak. `agent` is the project agent reading the journal alongside the
+#: human; `embry` is the persona herself; `horus` is the second persona, voiced
+#: and bound exactly as she is (2026-08-20: his audio is first-class, not a
+#: sidecar artifact).
+ROLES = ("human", "agent", "embry", "horus")
+
+#: Roles whose turns must carry a requested tone and rendered audio.
+VOICED_ROLES = ("embry", "horus")
+
+
+def utc_now() -> str:
+    return datetime.now().astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(Path(path).resolve().relative_to(REPO_ROOT.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def sha_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def sha_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def corrected_goal_text(prefix: str, answer_body: str, suffix: str) -> str:
+    return " ".join(part.strip() for part in (prefix, answer_body, suffix) if part and part.strip())
+
+
+def _nonnegative_int(value: Any, name: str, failed: list[str]) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        failed.append(f"{name}_not_integer")
+        return None
+    if parsed < 0:
+        failed.append(f"{name}_negative")
+    return parsed
+
+
+def build_turn(args: argparse.Namespace, run_dir: Path) -> tuple[dict[str, Any], list[str]]:
+    """The turn to append, plus any gate failures that should block the write."""
+    failed: list[str] = []
+    text = (args.text or "").strip()
+    if not text:
+        failed.append("empty_text")
+
+    turn: dict[str, Any] = {
+        "schema": "persona_dream.conversation_turn.v1",
+        "role": args.role,
+        "text": text,
+        "created_at": args.created_at or utc_now(),
+    }
+
+    # Bind the turn to the entry it is about, so a conversation can never drift
+    # onto a different run's journal without it being visible in the record.
+    spoken = run_dir / "journal_spoken.txt"
+    if spoken.is_file():
+        turn["journal_spoken_sha256"] = sha_file(spoken)
+
+    answer_body = (getattr(args, "answer_body", None) or "").strip()
+    answer_body_hash = (getattr(args, "answer_body_sha256", None) or "").strip()
+    emotional_prefix = (getattr(args, "emotional_prefix", None) or "").strip()
+    emotional_suffix = (getattr(args, "emotional_suffix", None) or "").strip()
+    corrected_goal_fields = any((answer_body, answer_body_hash, emotional_prefix, emotional_suffix))
+    if corrected_goal_fields:
+        if args.role != "embry":
+            failed.append("corrected_goal_fields_embry_only")
+        if not answer_body:
+            failed.append("answer_body_missing")
+        expected_hash = sha_text(answer_body) if answer_body else ""
+        if answer_body_hash != expected_hash:
+            failed.append("answer_body_sha256_mismatch")
+        expected_text = corrected_goal_text(emotional_prefix, answer_body, emotional_suffix)
+        if text != expected_text:
+            failed.append("corrected_goal_text_composition_mismatch")
+        if answer_body and text.count(answer_body) != 1:
+            failed.append("answer_body_not_exactly_once")
+        counts: dict[str, int] = {}
+        for key in ("factual_claims_in_emotional_frame", "contradiction_count", "unsupported_fact_count"):
+            parsed = _nonnegative_int(getattr(args, key, None), key, failed)
+            counts[key] = parsed if parsed is not None else 0
+            if parsed not in (None, 0):
+                failed.append(f"{key}_must_be_zero")
+        turn.update({
+            "answer_body": answer_body,
+            "answer_body_sha256": answer_body_hash,
+            "emotional_prefix": emotional_prefix,
+            "emotional_suffix": emotional_suffix,
+            "factual_claims_in_emotional_frame": counts["factual_claims_in_emotional_frame"],
+            "contradiction_count": counts["contradiction_count"],
+            "unsupported_fact_count": counts["unsupported_fact_count"],
+        })
+
+    if args.role in VOICED_ROLES:
+        # A voiced persona turn must carry the same binding the journal does.
+        if not args.tone:
+            failed.append(f"{args.role}_turn_requires_tone")
+        if not args.audio:
+            failed.append(f"{args.role}_turn_requires_audio")
+        turn["requested_delivery_tone"] = args.tone
+        chatterbox_utterance_text = getattr(args, "chatterbox_utterance_text", None)
+        tts_render_text = getattr(args, "tts_render_text", None) or chatterbox_utterance_text or text
+        emotional_utterance_tags = getattr(args, "emotional_utterance_tags", None)
+        turn["answer_text_hash"] = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        turn["tts_render_text"] = str(tts_render_text).strip()
+        turn["tts_render_text_hash"] = "sha256:" + hashlib.sha256(turn["tts_render_text"].encode("utf-8")).hexdigest()
+        if chatterbox_utterance_text:
+            turn["chatterbox_utterance_text"] = chatterbox_utterance_text.strip()
+        if emotional_utterance_tags:
+            turn["emotional_utterance_tags"] = [tag.strip() for tag in emotional_utterance_tags.split(",") if tag.strip()]
+        chatterbox_pause_plan = getattr(args, "chatterbox_pause_plan", None)
+        if chatterbox_pause_plan:
+            try:
+                parsed_pause_plan = json.loads(chatterbox_pause_plan)
+                if isinstance(parsed_pause_plan, list):
+                    turn["chatterbox_pause_plan"] = parsed_pause_plan
+                else:
+                    failed.append("chatterbox_pause_plan_not_list")
+            except json.JSONDecodeError:
+                failed.append("chatterbox_pause_plan_not_json")
+        turn["tone_boundary"] = (
+            "requested_delivery_tone is the delivery preset, not achieved emotion by itself; "
+            "emotional_utterance_tags are native Chatterbox Turbo inline event tags injected into answer_text"
+        )
+        if args.audio:
+            audio = Path(args.audio)
+            if not audio.is_absolute():
+                audio = run_dir / audio
+            if not audio.is_file():
+                failed.append(f"audio_not_found:{audio}")
+            else:
+                turn["audio"] = audio.name if audio.parent == run_dir else str(audio)
+                turn["audio_sha256"] = sha_file(audio)
+    elif args.tone or args.audio:
+        # A human/agent turn does not have a delivery tone. Silently dropping
+        # the flag would make the record claim less than the caller thinks it
+        # does. Keep the historical embry_only token for the retained #1210
+        # contract while the allowed voiced-role set now includes Horus too.
+        failed.append(f"embry_only_delivery_tone_rejected_for_role:{args.role}")
+
+    return turn, failed
+
+
+def append_turn(path: Path, turn: dict[str, Any]) -> int:
+    """Append one JSON line under an exclusive lock. Returns the new line count."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(turn, sort_keys=True) + "\n"
+    with path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    return sum(1 for _ in path.open(encoding="utf-8"))
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = Path(args.run_dir).resolve()
+    path = run_dir / "conversation.jsonl"
+    turn, failed = build_turn(args, run_dir)
+
+    if failed:
+        return {
+            "schema": "persona_dream.conversation_append_receipt.v1",
+            "created_at": utc_now(), "status": "BLOCKED_CONVERSATION_APPEND",
+            "mocked": False, "live": False, "run_dir": rel(run_dir),
+            "conversation": rel(path), "turn": turn, "failed_gates": failed,
+        }
+
+    before = sum(1 for _ in path.open(encoding="utf-8")) if path.is_file() else 0
+    after = append_turn(path, turn)
+
+    # Read back. The write is not the evidence; the line being there is.
+    last = None
+    for raw in path.open(encoding="utf-8"):
+        raw = raw.strip()
+        if raw:
+            last = raw
+    read_back = False
+    try:
+        read_back = json.loads(last) == turn if last else False
+    except json.JSONDecodeError:
+        read_back = False
+    if not read_back:
+        failed.append("appended_line_did_not_read_back")
+
+    return {
+        "schema": "persona_dream.conversation_append_receipt.v1",
+        "created_at": utc_now(),
+        "status": "PASS_CONVERSATION_APPENDED" if not failed else "BLOCKED_CONVERSATION_APPEND",
+        "mocked": False,
+        "live": True,
+        "run_dir": rel(run_dir),
+        "conversation": rel(path),
+        "conversation_sha256": sha_file(path),
+        "turns_before": before,
+        "turns_after": after,
+        "appended": turn,
+        "read_back": read_back,
+        "append_only": True,
+        "claims": {
+            "proves": [
+                "the turn is durably recorded and survives the browser",
+                "the turn is bound by hash to the journal it discusses",
+            ] if not failed else [],
+            "does_not_prove": [
+                "that the conversation reaches memory or influences a later dream; "
+                "that return arc is blocked on graph-memory-operator#99",
+                "for an embry turn, that the requested tone is audible",
+            ],
+        },
+        "failed_gates": failed,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--run-dir", type=Path, required=True)
+    ap.add_argument("--role", choices=ROLES, required=True)
+    ap.add_argument("--text", required=True)
+    ap.add_argument("--tone", help="voiced turns (embry/horus) only: the delivery tone requested")
+    ap.add_argument("--audio", help="voiced turns (embry/horus) only: rendered audio for this turn")
+    ap.add_argument("--chatterbox-utterance-text", help="exact answer_text sent to Chatterbox, including inline event tags")
+    ap.add_argument("--tts-render-text", help="exact text submitted to TTS; defaults to chatterbox utterance text or clean text")
+    ap.add_argument("--emotional-utterance-tags", help="comma-separated native Chatterbox event tags injected into answer_text")
+    ap.add_argument("--chatterbox-pause-plan", help="JSON list of Chatterbox render chunks with pause_after_ms")
+    ap.add_argument("--answer-body", help="corrected-goal immutable answer body for Embry turns")
+    ap.add_argument("--answer-body-sha256", help="sha256: digest of --answer-body")
+    ap.add_argument("--emotional-prefix", default="", help="Tau-drafted emotional text before the corrected-goal answer")
+    ap.add_argument("--emotional-suffix", default="", help="Tau-drafted emotional text after the corrected-goal answer")
+    ap.add_argument("--factual-claims-in-emotional-frame", default="0")
+    ap.add_argument("--contradiction-count", default="0")
+    ap.add_argument("--unsupported-fact-count", default="0")
+    ap.add_argument("--created-at", help="override the timestamp (tests, backfill)")
+    ap.add_argument("--out", type=Path)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    r = run(args)
+    if args.out:
+        Path(args.out).write_text(json.dumps(r, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(r, indent=2, sort_keys=True) if args.json else
+          f"{r['status']}  {r.get('conversation')}  turns={r.get('turns_after')}  "
+          f"read_back={r.get('read_back')}" + (f"  failed={r['failed_gates']}" if r["failed_gates"] else ""))
+    return 0 if r["status"].startswith("PASS_") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

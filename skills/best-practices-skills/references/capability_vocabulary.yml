@@ -1,0 +1,247 @@
+schema: best-practices-skills.capability_vocabulary.v1
+capabilities:
+  pi-subagent-plan:
+    providers:
+      - pi-orchestrator
+  pi-subagent-workflow-script:
+    providers:
+      - pi-orchestrator
+  pi-workflow-recall:
+    providers:
+      - pi-orchestrator
+  data-anonymization:
+    providers:
+      - anonymize-data
+  name-alias-discovery:
+    providers:
+      - anonymize-data
+  google-meet-preflight:
+    providers:
+      - ops-google-meet
+  meeting-companion-launch-plan:
+    providers:
+      - ops-google-meet
+  llm-completion:
+    providers:
+      - scillm
+      - codex
+  embedding:
+    providers:
+      - embedding
+  memory-recall:
+    providers:
+      - memory
+  memory-learn:
+    providers:
+      - memory
+  web-search:
+    providers:
+      - brave-search
+      - dogpile
+  pdf-extraction:
+    providers:
+      - extractor
+      - review-pdf
+  security-scan:
+    providers:
+      - hack
+      - security-scan
+  skill-creation:
+    providers:
+      - prompt-lab
+      - gpt-lab
+      - classifier-lab
+  skill-validation:
+    providers:
+      - skills-ci
+      - best-practices-skills
+  skill-scaffolding:
+    providers:
+      - best-practices-skills
+  composition-rules:
+    providers:
+      - best-practices-skills
+  misuse-guard-template:
+    providers:
+      - best-practices-skills
+  project-state-readiness-pattern:
+    providers:
+      - best-practices-skills
+  animation-vocabulary:
+    providers:
+      - animation-vocabulary
+  apple-interface-design-guidance:
+    providers:
+      - apple-design
+  fluid-motion-guidance:
+    providers:
+      - apple-design
+  design-engineering-guidance:
+    providers:
+      - emil-design-eng
+  svg-design-guardrails:
+    providers:
+      - best-practices-svg-design
+  excalidraw-toolkit:
+    providers:
+      - ops-excalidraw
+  excalidraw-validation:
+    providers:
+      - ops-excalidraw
+  create-svg-scene-input:
+    providers:
+      - ops-excalidraw
+  card-legibility-contract:
+    providers:
+      - best-practices-svg-design
+  ui-polish-guidance:
+    providers:
+      - emil-design-eng
+  animation-opportunity-audit:
+    providers:
+      - find-animation-opportunities
+  animation-audit:
+    providers:
+      - improve-animations
+  animation-improvement-plan:
+    providers:
+      - improve-animations
+  ui-library-selection:
+    providers:
+      - pick-ui-library
+  ui-variant-prototyping:
+    providers:
+      - prototype
+  animation-review:
+    providers:
+      - review-animations
+  skill-evaluation:
+    providers:
+      - eval-skills
+  behavioral-testing:
+    providers:
+      - eval-skills
+  agentic-evaluation:
+    providers:
+      - agentic-evals
+  multi-trial-evaluation:
+    providers:
+      - agentic-evals
+  readiness-scoring:
+    providers:
+      - agentic-evals
+  trajectory-validation-pattern:
+    providers:
+      - agentic-evals
+  verbosity-review:
+    providers:
+      - verbosity-cleaner
+  verbosity-cleanup:
+    providers:
+      - verbosity-cleaner
+  test-economy-review:
+    providers:
+      - verbosity-cleaner
+  competitive-selection:
+    providers:
+      - battle
+  hardening:
+    providers:
+      - anvil
+  docker-isolation:
+    providers:
+      - battle
+      - hack
+  human-interview:
+    providers:
+      - interview
+  task-planning:
+    providers:
+      - plan
+  task-orchestration:
+    providers:
+      - orchestrate
+  taxonomy-tagging:
+    providers:
+      - taxonomy
+  progress-tracking:
+    providers:
+      - task-monitor
+  ops-herdr-orchestration:
+    providers:
+      - ops-herdr
+  visible-subagent-runtime:
+    providers:
+      - ops-herdr
+  dynamic-agent-workspaces:
+    providers:
+      - ops-herdr
+  pane-agent-communication:
+    providers:
+      - ops-herdr
+  creator-reviewer-loop-runtime:
+    providers:
+      - ops-herdr
+  live-transcription:
+    providers:
+      - live-evidence
+  live-evidence-retrieval:
+    providers:
+      - live-evidence
+  source-bound-talking-points:
+    providers:
+      - live-evidence
+  interview-copilot-ui:
+    providers:
+      - live-evidence
+  canonical-resume-validation:
+    providers:
+      - resume
+  claim-bound-resume-tailoring:
+    providers:
+      - resume
+  resume-artifact-handoff:
+    providers:
+      - resume
+  font-world-contract:
+    providers:
+      - best-practices-font
+  type-role-hierarchy:
+    providers:
+      - best-practices-font
+  font-pairing-rationale:
+    providers:
+      - best-practices-font
+  font-proof-receipt:
+    providers:
+      - best-practices-font
+  font-template-residue-audit:
+    providers:
+      - best-practices-font
+  house-conformance-gate: [pitchdeck]
+  house-style-measurement: [pitchdeck]
+  author-voice-profile: [pitchdeck]
+  nearest-slide-layout-retrieval: [pitchdeck]
+  native-editable-icon-library: [pitchdeck]
+  deck-architecture-laws: [best-practices-pitchdeck]
+  sectioning-contract: [best-practices-pitchdeck]
+  slide-plan-review: [best-practices-pitchdeck]
+  delivery-claim-receipt-contract:
+    description: Destination-receipt requirements for any claim that an external effect occurred
+    providers: [best-practices-delivery-proof]
+  self-status-is-not-delivery-rule:
+    description: Transport self-status (argv, wrapper flags, prepared prompts) never proves delivery
+    providers: [best-practices-delivery-proof]
+  bounded-escalation-ladder:
+    description: Receipt-gated escalation for failed external operations with a defined stop
+    providers: [best-practices-delivery-proof]
+  stale-artifact-shadowing-guard:
+    description: One attempt one artifact root; stale receipts cannot impersonate live runs
+    providers: [best-practices-delivery-proof]
+  self-kill-footgun-procedures:
+    description: Kill procedures that cannot match the invoking shell or strand lock-holding children
+    providers: [best-practices-delivery-proof]
+  human-named-target-authority-rule:
+    description: A human-named delivery target is binding; undeliverable means NEEDS_ATTENTION, never reroute
+    providers: [best-practices-delivery-proof]
+  - best-practices-workflowscript

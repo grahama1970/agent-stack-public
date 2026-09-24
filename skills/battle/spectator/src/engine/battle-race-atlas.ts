@@ -1,0 +1,70 @@
+import { Assets, Cache, type Spritesheet, type Texture } from "pixi.js";
+import { ensureBattlePixiAssets } from "./battle-runner-sprites";
+
+/**
+ * Marker/effect atlas lives under the same host contract as runner sprites:
+ * `/battle-sprites/pixijs/*` (see skills/battle/assets/sprites/pixijs/).
+ * Pixi loader expects `{name}.{format}.json` (e.g. `battle-race-atlas.png.json`).
+ */
+export const BATTLE_RACE_ATLAS_ALIAS = "battle-race-atlas";
+
+let atlasSheet: Spritesheet | null = null;
+let atlasLoad: Promise<Spritesheet> | null = null;
+
+export function battleRaceSpritesheet(): Spritesheet | null {
+	return atlasSheet;
+}
+
+export function battleRaceAtlasTextures(): Record<string, Texture> | null {
+	return atlasSheet?.textures ?? null;
+}
+
+export async function loadBattleRaceAtlas(): Promise<Spritesheet> {
+	if (atlasSheet) return atlasSheet;
+	const cached = Assets.get<Spritesheet>(BATTLE_RACE_ATLAS_ALIAS);
+	if (cached?.textures && Object.keys(cached.textures).length > 0) {
+		atlasSheet = cached;
+		return atlasSheet;
+	}
+	if (!atlasLoad) {
+		atlasLoad = (async () => {
+			await ensureBattlePixiAssets();
+			const sheet = await Assets.load<Spritesheet>(BATTLE_RACE_ATLAS_ALIAS);
+			if (!sheet?.textures || Object.keys(sheet.textures).length === 0) {
+				throw new Error("Battle race spritesheet missing frames: battle-race-atlas.png.json");
+			}
+			atlasSheet = sheet;
+			return atlasSheet;
+		})().catch((error) => {
+			atlasLoad = null;
+			throw error;
+		});
+	}
+	return atlasLoad;
+}
+
+export function textureFromAtlas(frame: string | undefined, atlas: Record<string, Texture> | null): Texture | undefined {
+	if (!frame || !atlas) return undefined;
+	return atlas[frame];
+}
+
+/** pixijs-assets/references/caching.md — detach sprites, then Assets.unload */
+export async function unloadBattleRaceAtlas(): Promise<void> {
+	if (!atlasSheet && !atlasLoad) return;
+	if (atlasLoad) {
+		try {
+			await atlasLoad;
+		} catch {
+			// load failed
+		}
+	}
+	atlasSheet = null;
+	atlasLoad = null;
+	if (Cache.has(BATTLE_RACE_ATLAS_ALIAS)) {
+		try {
+			await Assets.unload(BATTLE_RACE_ATLAS_ALIAS);
+		} catch {
+			// ignore double-unload / React strict-mode races
+		}
+	}
+}

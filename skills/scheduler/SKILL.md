@@ -1,0 +1,346 @@
+---
+name: scheduler
+description: >
+  Background task scheduler for Pi and Claude Code. Register, list, and run
+  scheduled jobs. Supports cron syntax and one-shot triggers.
+allowed-tools: Bash
+triggers:
+  - schedule task
+  - register job
+  - list scheduled jobs
+  - run job
+  - background scheduler
+metadata:
+  short-description: Background task scheduler for agents
+provides:
+  - scheduling
+composes:
+  - task-monitor
+  - agentic-evals
+taxonomy:
+  - orchestration
+  - automation
+disciplines:
+  - observability-operations
+  - agentic-orchestration
+---
+
+# Scheduler Skill
+
+A lightweight background task scheduler that both Pi and Claude Code can use to:
+- Schedule periodic tasks (cron syntax)
+- Register one-shot or recurring jobs
+- Trigger jobs on-demand
+- List and manage scheduled tasks
+
+## Quick Start
+
+```bash
+# Start the scheduler daemon
+.pi/skills/scheduler/run.sh start
+
+# Register a job
+.pi/skills/scheduler/run.sh register \
+  --name "edge-verify-nightly" \
+  --cron "0 2 * * *" \
+  --command ".pi/skills/edge-verifier/run.sh --batch"
+
+# List all jobs
+.pi/skills/scheduler/run.sh list
+
+# Run a job immediately
+.pi/skills/scheduler/run.sh run edge-verify-nightly
+
+# Check status
+.pi/skills/scheduler/run.sh status
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `start` | Start the scheduler daemon |
+| `stop` | Stop the scheduler daemon |
+| `status` | Show daemon status and next job runs |
+| `register` | Register a new job |
+| `unregister` | Remove a job |
+| `list` | List all registered jobs |
+| `run <name>` | Run a job immediately |
+| `enable <name>` | Enable a disabled job |
+| `disable <name>` | Disable a job without removing |
+| `logs [name]` | Show job execution logs |
+| `load <file>` | Load jobs from services.yaml |
+| `report` | Comprehensive status report with metrics |
+
+## Register Options
+
+| Option | Description |
+|--------|-------------|
+| `--name` | Unique job identifier |
+| `--cron` | Cron expression (e.g., "0 2 * * *" for 2am daily) |
+| `--interval` | Run every N seconds/minutes/hours (e.g., "1h", "30m") |
+| `--command` | Shell command to execute |
+| `--workdir` | Working directory (default: skill's parent project) |
+| `--enabled` | Whether job starts enabled (default: true) |
+| `--description` | Human-readable description |
+
+## Cron Syntax
+
+```
+┌───────────── minute (0-59)
+│ ┌───────────── hour (0-23)
+│ │ ┌───────────── day of month (1-31)
+│ │ │ ┌───────────── month (1-12)
+│ │ │ │ ┌───────────── day of week (0-6, Sun=0)
+│ │ │ │ │
+* * * * *
+```
+
+Examples:
+- `0 2 * * *` - Every day at 2:00 AM
+- `*/15 * * * *` - Every 15 minutes
+- `0 0 * * 0` - Every Sunday at midnight
+- `0 9-17 * * 1-5` - Every hour 9am-5pm, Mon-Fri
+
+## Storage
+
+Jobs are stored in `~/.pi/scheduler/jobs.json`:
+
+```json
+{
+  "edge-verify-nightly": {
+    "name": "edge-verify-nightly",
+    "cron": "0 2 * * *",
+    "command": ".pi/skills/edge-verifier/run.sh --batch",
+    "workdir": "/home/user/workspace/memory",
+    "enabled": true,
+    "description": "Nightly edge verification",
+    "created_at": 1705123456,
+    "last_run": 1705209856,
+    "last_status": "success"
+  }
+}
+```
+
+Logs are stored in `~/.pi/scheduler/logs/`.
+
+## Integration with Memory Project
+
+Pre-configured jobs for memory automation:
+
+```bash
+# Edge verification (nightly)
+./run.sh register --name "memory-edge-verify" \
+  --cron "0 2 * * *" \
+  --command ".pi/skills/edge-verifier/run.sh --batch" \
+  --workdir "$MEMORY_PROJECT_DIR"
+
+# Treesitter ingestion (hourly)
+./run.sh register --name "memory-treesitter-ingest" \
+  --cron "0 * * * *" \
+  --command ".pi/skills/treesitter/run.sh scan src/ --json" \
+  --workdir "$MEMORY_PROJECT_DIR"
+```
+
+## Daemon Management
+
+The scheduler runs as a background process. Use systemd for production:
+
+```bash
+# Generate systemd unit
+./run.sh systemd-unit > ~/.config/systemd/user/pi-scheduler.service
+systemctl --user enable pi-scheduler
+systemctl --user start pi-scheduler
+```
+
+## Metrics Server
+
+When the scheduler starts, it also runs a metrics server for monitoring and API access.
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Service info and endpoint list |
+| `/status` | GET | Daemon status, uptime, job counts |
+| `/jobs` | GET | List all jobs with status |
+| `/jobs/{name}` | GET | Get specific job details |
+| `/jobs/{name}/logs` | GET | Get job execution logs |
+| `/jobs/{name}/run` | POST | Trigger job immediately |
+| `/metrics` | GET | Prometheus-compatible metrics |
+| `/docs` | GET | OpenAPI documentation |
+
+### Example Usage
+
+```bash
+# Start scheduler with metrics on custom port
+./run.sh start --port 8610
+
+# Query status via API
+curl http://localhost:8610/status
+
+# List jobs
+curl http://localhost:8610/jobs
+
+# Trigger a job via API
+curl -X POST http://localhost:8610/jobs/memory-edge-verify/run
+
+# Get Prometheus metrics
+curl http://localhost:8610/metrics
+```
+
+### Port Discovery
+
+The metrics port is written to `~/.pi/scheduler/.port` for service discovery.
+
+```bash
+PORT=$(cat ~/.pi/scheduler/.port)
+curl http://localhost:$PORT/status
+```
+
+## Loading from YAML
+
+Load jobs from a project's `services.yaml` file:
+
+```bash
+./run.sh load /path/to/project/.agents/services.yaml
+```
+
+YAML format:
+
+```yaml
+version: "1.0"
+project: memory
+workdir: /home/user/workspace/memory
+
+scheduled:
+  treesitter-ingest:
+    description: "Parse and index codebase"
+    command: ".pi/skills/treesitter/run.sh scan src/"
+    schedule: "0 * * * *"  # Hourly
+    enabled: true
+    timeout: 300
+
+  edge-verifier:
+    description: "LLM verification of edges"
+    command: ".pi/skills/edge-verifier/run.sh --batch"
+    schedule: "0 2 * * *"  # 2am daily
+    enabled: true
+
+hooks:
+  episodic-archiver:
+    description: "Archive conversation"
+    trigger: "stop"
+    command: ".pi/skills/episodic-archiver/run.sh archive"
+```
+
+## Reports
+
+Generate comprehensive reports with metrics and failure analysis:
+
+```bash
+# Rich TUI report
+./run.sh report
+
+# JSON for automation
+./run.sh report --json
+```
+
+Report includes:
+- **Summary**: Total jobs, success rate, average duration
+- **Per-job stats**: Last run, duration, status
+- **Recent failures**: With log excerpts
+- **Recommendations**: Actionable next steps
+
+Example output:
+
+```
+╭──────────────────────╮
+│   Scheduler Report   │
+│ 2025-01-21 14:30:00  │
+╰──────────────────────╯
+
+Summary
+  Total Jobs    12
+  Enabled       10
+  Jobs Run      8
+  Success Rate  87.5%
+  Avg Duration  45.2s
+  Failures      1
+
+Job Status
+┏━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┓
+┃ Job               ┃ Schedule    ┃ Last Run  ┃ Duration ┃ Status  ┃
+┡━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━┩
+│ edge-verifier     │ 0 2 * * *   │ 01-21 02:00│ 120.5s  │ success │
+│ treesitter-ingest │ 0 * * * *   │ 01-21 14:00│ 5.2s    │ success │
+│ db-backup         │ 0 3 * * *   │ 01-21 03:00│ 45.0s   │ failed  │
+└───────────────────┴─────────────┴───────────┴──────────┴─────────┘
+
+Recent Failures
+  db-backup - failed at 2025-01-21 03:00
+  ╭─ Log excerpt ─────────────────────────────╮
+  │ ERROR: Connection refused to ArangoDB    │
+  ╰──────────────────────────────────────────╯
+
+Recommendations
+  • Review 1 failed job(s) with: scheduler logs db-backup
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCHEDULER_DATA_DIR` | `~/.pi/scheduler` | Data directory |
+| `SCHEDULER_METRICS_PORT` | `8610` | Metrics server port |
+| `SCHEDULER_LOG_LEVEL` | `INFO` | Log verbosity |
+| `SCHEDULER_PID_FILE` | `~/.pi/scheduler/scheduler.pid` | PID file location |
+
+## Daemon schedule truth (2026-09-23 silent-rejection fix)
+
+The daemon loads `jobs.json` into APScheduler **only at daemon start or explicit
+reload**. `register` writing jobs.json has never scheduled anything by itself.
+
+On 2026-09-22 this silently ate four enabled jobs (including `instinct-answer-drain`,
+`*/5`): register reported success, `status` listed them enabled, the daemon had no
+in-memory entry, and nothing surfaced it for weeks. Fixed to fail loud:
+
+- `POST /reload` — daemon re-reads jobs.json and reschedules; returns `{scheduled, failed}`.
+- `GET /scheduled` — the daemon's REAL in-memory schedule (id + next run). `/jobs`
+  re-reads disk and proves nothing about liveness.
+- `register` — after the disk write it confirms the daemon scheduled the job
+  (auto-reloads once); otherwise exits non-zero with a `$triage-error` code.
+- `status --json` / `report --json` — carry `stranded_jobs` (enabled, scheduled-or-due,
+  never ran) and `stranded_triage_code`.
+- SIGHUP also reloads.
+
+Canonical scheduler failure codes (`$triage-error`, layer `scheduler`):
+`scheduler_daemon_not_running`, `scheduler_job_registered_but_not_scheduled`,
+`scheduler_job_stranded_never_ran`, `scheduler_job_command_failed`.
+
+Jev is deliberately NOT used here: job success/failure is a deterministic exit
+code plus a log file, which triage-error already resolves; a semantic judge adds
+cost without resolving ambiguity.
+
+The systemd unit must point at the canonical agent-skills checkout — a unit
+pointing at a deleted worktree path survives on in-memory code and silently
+misses every scheduler fix (that exact state ran from 2026-09-02 to 2026-09-23).
+
+## Common Mistakes
+
+```bash
+# WRONG: Register job, assume it will run
+./run.sh register --name "nightly" --cron "0 2 * * *" --command "..."
+# → Daemon crashed 3h ago — job written to disk but never executes
+# RIGHT: register now CONFIRMS the daemon schedule (fails loud if not),
+# but still check daemon status for out-of-band daemon death:
+./run.sh status | grep "running" || ./run.sh start
+
+# WRONG: Trust last_run field for batch-added jobs
+# → Known bug: scheduler doesn't write last_run back for t2/t3/t5 batch jobs
+# RIGHT: Check actual log files for execution evidence
+
+# WRONG: No working directory validation in job command
+# → Job runs but cwd is wrong, all file paths fail silently
+# RIGHT: Use absolute paths in job commands
+```

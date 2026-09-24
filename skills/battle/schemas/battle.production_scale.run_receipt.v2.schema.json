@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Production-scale Battle run receipt v2",
+  "type": "object",
+  "required": ["schema", "status", "winner", "scoreboard", "incomplete_gates", "blocked_rounds"],
+  "properties": {
+    "schema": {"const": "battle.production_scale.run_receipt.v2"},
+    "status": {"enum": ["PASS", "BLOCKED", "GATES_INCOMPLETE", "CHAIN_MISMATCH"]},
+    "winner": {"type": ["string", "null"]},
+    "scoreboard": {
+      "type": "object",
+      "required": ["schema", "status", "winner", "round_receipts", "incomplete_gates", "blocked_rounds", "score_authority"],
+      "properties": {
+        "schema": {"const": "battle.production_scale.scorekeeper_receipt.v2"},
+        "status": {"enum": ["PASS", "GATES_INCOMPLETE", "CHAIN_MISMATCH"]},
+        "score_authority": {"const": "judge_origin_verified_round_receipts_only"},
+        "score_origin_policy": {"const": "scorekeeper_aggregates_judge_authority_and_never_accepts_team_verdicts"},
+        "winner": {"type": ["string", "null"]},
+        "round_receipts": {"type": "array"},
+        "incomplete_gates": {"type": "array"},
+        "blocked_rounds": {"type": "array"}
+      }
+    },
+    "incomplete_gates": {"type": "array"},
+    "blocked_rounds": {"type": "array"}
+  }
+}

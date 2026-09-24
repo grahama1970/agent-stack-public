@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.local
+.ensure-surf-cli-build.lock
+
+# Test coverage
+coverage/
+.playwright-mcp/
+FEATURE_COMPARISON.md

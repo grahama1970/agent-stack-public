@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "persona_dream.research.prospective_tom.social_episode.v1",
+  "type": "object",
+  "required": [
+    "episode_id",
+    "scenario_family",
+    "hidden_world_state",
+    "counterpart_beliefs",
+    "counterpart_goals",
+    "counterpart_preferences",
+    "counterpart_policy",
+    "information_access_by_agent",
+    "observable_history",
+    "allowed_next_actions",
+    "actual_next_action",
+    "ground_truth_tom_labels"
+  ],
+  "properties": {
+    "episode_id": {"type": "string", "minLength": 1},
+    "scenario_family": {
+      "type": "string",
+      "enum": [
+        "information_asymmetry_false_belief",
+        "preference_desire_uncertainty",
+        "trust_commitment_relationship",
+        "coordination_conflict"
+      ]
+    },
+    "hidden_world_state": {"type": "object"},
+    "counterpart_beliefs": {"type": "object"},
+    "counterpart_goals": {"type": "object"},
+    "counterpart_preferences": {"type": "object"},
+    "counterpart_policy": {"type": "object"},
+    "information_access_by_agent": {"type": "object"},
+    "observable_history": {"type": "array"},
+    "allowed_next_actions": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1
+    },
+    "actual_next_action": {"type": ["string", "null"]},
+    "ground_truth_tom_labels": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": [
+          "label_id",
+          "perspective_order",
+          "subject",
+          "target",
+          "mental_state_type",
+          "proposition",
+          "value",
+          "label_source"
+        ],
+        "properties": {
+          "label_id": {"type": "string", "minLength": 1},
+          "perspective_order": {"type": "integer", "minimum": 1, "maximum": 2},
+          "subject": {"type": "string", "minLength": 1},
+          "target": {"type": "string", "minLength": 1},
+          "mental_state_type": {
+            "type": "string",
+            "enum": ["belief", "goal", "desire", "intention", "emotion", "knowledge", "action"]
+          },
+          "proposition": {"type": "string", "minLength": 1},
+          "value": {"type": "string", "minLength": 1},
+          "label_source": {"type": "string", "const": "simulator_config"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,288 @@
+---
+name: ticket
+description: >
+  File, split, look up, lease, verify, comment, close, and route GitHub tickets
+  for agent-resolved bugs, features, design changes, maintenance, questions,
+  and triage. Use when users say ticket bug, ticket feature, ticket lookup,
+  split changes into tickets, lease a GitHub issue, attach proof, close a ticket,
+  or trigger GitHub Actions verification for a ticket.
+triggers:
+  - ticket bug
+  - ticket feature
+  - ticket lookup
+  - create github issue
+  - file a ticket
+  - split design changes into tickets
+  - lease a github issue
+  - attach proof to issue
+  - close a ticket with proof
+  - trigger github actions for a ticket
+provides:
+  - github-ticket-filing
+  - ticket-fleet-splitting
+  - ticket-lookup
+  - ticket-lease-routing
+  - ticket-proof-attachment
+  - github-actions-ticket-verification
+composes:
+  - best-practices-github-ticket
+  - agentic-evals
+complies:
+  - best-practices-skills
+  - best-practices-github-ticket
+  - best-practices-python
+taxonomy:
+  - governance
+  - orchestration
+  - validation
+  - proof
+runtime_self_improvement: basic
+disciplines:
+  - developer-tooling
+  - agentic-orchestration
+---
+
+# Ticket
+
+Thin CLI for GitHub ticket filing and issue lifecycle operations. It applies
+`$best-practices-github-ticket` ticket body contracts and delegates guarded
+issue state changes to `skills/best-practices-github-ticket/scripts/gh-ticket-tools.sh`.
+
+In the shared maintainer architecture, `$ticket` is the work-item boundary
+between monitor/reporting skills and Tau-backed repair workers. Monitors may
+draft or explicitly create tickets; maintainers lease one ticket at a time;
+reviewers/verifiers attach deterministic proof before closure.
+
+Worktree retention is part of the ticket lifecycle. A resolver must not create
+ad hoc implementation worktrees before leasing the ticket, and must not leave a
+secondary worktree behind silently. Use the shared audit before release, block
+with release, close, or handoff whenever a secondary worktree was used:
+
+```bash
+skills/best-practices-github-ticket/scripts/audit-worktrees.sh --repo /path/to/repo --json
+```
+
+The audit fails on `/tmp` worktrees, prunable registrations, and dirty secondary
+worktrees. It does not delete anything; the resolver must commit, remove, or
+explicitly retain each flagged path in the ticket proof.
+
+## Use
+
+```bash
+skills/ticket/run.sh bug "Fix stale WebGPT tab recovery" \
+  --target skills/surf \
+  --observed "webgpt.submit fails after stale CDP attach" \
+  --expected "emits exact extract/resume command or repairs safely" \
+  --repro "Run webgpt.submit against a stale controlled tab" \
+  --proof "focused surf test plus webgpt preflight smoke"
+
+skills/ticket/run.sh feature "Add compact design sidebar" \
+  --target skills/hum/ui \
+  --limitation "Design requests arrive as broad batches" \
+  --capability "Split UI work into independently verifiable tickets" \
+  --workflow "Designer files one focused change per acceptance criterion" \
+  --acceptance "Each ticket has screenshot proof and a focused test" \
+  --proof "targeted UI test plus screenshot"
+
+skills/ticket/run.sh fleet design-review.md \
+  --target skills/hum/ui \
+  --route design_or_ux \
+  --agent designer
+
+skills/ticket/run.sh maintenance "Repair monitor-skill-health finding" \
+  --target skills/example \
+  --invariant "Target skill passes its monitor-skill-health finding" \
+  --cleanup "Concrete violation emitted by latest_results.jsonl" \
+  --scoped-files "skills/example/SKILL.md" \
+  --proof "skills/monitor-skill-health/run.sh audit --skill example --no-memory --no-deep-review --json" \
+  --route backend_python_or_skill_runtime \
+  --agent agent-skill-maintainer \
+  --label monitor-skill-health
+```
+
+Ticket creation is preview-first. Add `--apply` to create issues. Lifecycle
+commands such as `lease`, `comment`, `block`, `release`, `close`, and
+`close-duplicate` call the guarded helper.
+
+## Proof default: local first
+
+Ticket verification defaults to deterministic local proof in the relevant
+repository or ticket-bound worktree: focused tests, scripts, service read-backs,
+generated artifacts, screenshots, database/query receipts, or other local
+checks named by the ticket. A local commit plus a local proof receipt is the
+normal closure path.
+
+Do not dispatch GitHub Actions by default. The `ci ...` commands are explicit
+opt-in helpers. Use them only when one of these is true:
+
+- The ticket acceptance criteria explicitly require GitHub Actions, CI, remote
+  runner behavior, or `.github/workflows/**` verification.
+- The change edits CI/workflow configuration and remote runner behavior is the
+  behavior under test.
+- Local proof cannot exercise a remote-only integration.
+- The human explicitly asks for GitHub Actions evidence.
+
+A GitHub Actions billing, quota, permission, or spending-limit failure blocks
+only the CI/cloud proof path. It does not block local repair, local commits, or
+local closure unless the ticket itself requires CI/cloud proof. Do not spend
+Actions minutes/runs for routine local proof.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `bug`, `feature`, `optimization`, `maintenance`, `question`, `triage` | Build and optionally create one compliant GitHub issue. |
+| `fleet FILE` | Split a list of requested changes into one ticket preview per item; `--apply` files them. |
+| `lookup` | Search, next, or show issues through the guarded helper. |
+| `memory-plan ISSUE --repo OWNER/REPO --json` | Compile deterministic `ticket.memory_concepts.v1` and `ticket.memory_query_plan.v1` without running Memory retrieval. |
+| `lease`, `comment`, `block`, `unblock`, `release`, `close`, `close-duplicate` | Guarded issue lifecycle wrappers. |
+| `verify ISSUE --cmd CMD` | Run deterministic local commands and write a proof file. |
+| `attach-proof ISSUE --file proof.md` | Comment proof on the issue. |
+| `ci status`, `ci rerun`, `ci dispatch` | Explicit opt-in GitHub Actions helpers; not part of default ticket verification. |
+
+## Cross-repo dependencies
+
+When a ticket cannot proceed until another ships, record the dependency
+machine-readably so `project-watchdog` can clear it:
+
+```bash
+skills/ticket/run.sh block 149 \
+  --reason reason.md \
+  --blocked-by grahama1970/graph-memory-operator#61 \
+  --release
+```
+
+Repeatable. Downstream gets `blocked:upstream` plus a `blocked-by: owner/repo#N`
+comment; upstream gets `blocks-downstream` and a back-link.
+
+Every reference is validated **before** the downstream issue is touched, and a
+reference that cannot be read is refused. The watchdog poll fails closed, so a
+bad reference would stall the downstream ticket forever rather than erroring.
+
+## Per-ticket bootstrap context
+
+`project-watchdog` forwards the whole issue body to the repair node, so the body
+is the only project context a stateless, cron-dispatched agent receives. Name the
+load-bearing files and skills at file time instead of making it rediscover them
+on every tick:
+
+```bash
+skills/ticket/run.sh bug "Fix the thing" \
+  --target skills/example \
+  --observed "..." --expected "..." --repro "..." \
+  --proof "live run against the real service, read back from the receipt" \
+  --context-file GOAL.md \
+  --context-file skills/example/src/thing.py \
+  --required-skill best-practices-python \
+  --required-skill review-code \
+  --depends-on grahama1970/agent-skills#1040
+```
+
+All three are optional and repeatable, and available on `bug`, `feature`,
+`optimization`, and `maintenance` — the agent-routable types. Omitting them
+leaves the body byte-identical to before. They are mirrored into the
+`ticket-skill` marker block for machine reads, and `--depends-on` renders
+`blocked-by: owner/repo#N`.
+
+For `agent-skills`, skill identity is path-scoped, not label-scoped. A target
+such as `skills/battle` emits `skill_id: battle` in the marker and memory-plan
+concepts. Do not comma-pack multiple skills into one `--target`; split the work
+or use `--depends-on` for cross-skill sequencing. `memory-plan` fails closed on
+comma-packed, absolute, traversal, glob, repo-root, and cross-skill targets.
+
+Agent-routable tickets may also carry compact Memory planning anchors:
+
+```bash
+skills/ticket/run.sh feature "Add deterministic context compiler" \
+  --target skills/ticket \
+  --limitation "Workers invent Memory query text independently" \
+  --capability "Emit deterministic concepts and a versioned Memory query plan" \
+  --workflow "Worker previews memory-plan before repair" \
+  --acceptance "Plan has concepts, recipe digest, selectors, and plan digest" \
+  --proof "skills/ticket/run.sh memory-plan 1362 --repo grahama1970/agent-skills --json; read back plan_sha256" \
+  --route backend_python_or_skill_runtime \
+  --memory-recipe ticket-repair-context-v1 \
+  --memory-symbol DiagramNode \
+  --memory-identifier binding_paths \
+  --memory-anchor "ticket context compiler"
+```
+
+These fields are explicit anchors only. `$ticket` must not use an LLM to invent
+symbols, paths, skills, commands, invariants, or proof clauses. A model may
+suggest concepts in a separate advisory workflow, but the canonical marker is
+what the filer supplied.
+
+## Memory query planning
+
+`memory-plan` is a preview-only compiler:
+
+```bash
+skills/ticket/run.sh memory-plan 1362 --repo grahama1970/agent-skills --json
+skills/ticket/run.sh memory-plan --body-file draft.md --repo grahama1970/agent-skills --json
+```
+
+It reads the live issue body when an issue number is supplied, parses the
+`ticket-skill` marker and structured sections, resolves the centrally versioned
+recipe registry at `skills/ticket/references/memory-query-recipes.yaml`, and
+emits:
+
+- `ticket.memory_concepts.v1`
+- `ticket.memory_query_plan.v1`
+- `issue_body_sha256`
+- `recipe_digest`
+- `concepts_sha256`
+- `plan_sha256`
+- effective required/conditional/exploratory steps
+- skipped steps with deterministic reasons
+- diagnostic commands for humans
+
+It must never execute Memory retrieval, mutate GitHub, paste raw AQL/Qdrant
+logic into the ticket, or expand the ticket's target paths/proof/non-goals. If a
+ticket is malformed, human-first, unsafe, missing required fields, or uses a
+recipe incompatible with its route, the command fails closed.
+
+Only the VARIABLE context belongs here. Universal execution policy — read
+project knowledge, lease one issue, fail closed, retain proof — lives in
+`best-practices-github-ticket` and is referenced, not copied into every issue:
+identical boilerplate in every body dilutes the ticket-specific signal and costs
+context on every dispatch.
+
+## Lifecycle gotchas (read before lease/block/close)
+
+- **Close requires an active `--agent` lease.** Run `lease ISSUE --agent NAME`
+  first (a bare `lease ISSUE` does not set `maintainer-active`); otherwise
+  `close` fails with `not leased with maintainer-active`.
+- **Worktrees are lease state.** Ticket work must use the live repository or a
+  ticket-bound worktree with a recorded path. Run the worktree audit before
+  release or close; do not park implementation work under `/tmp`.
+- **`--reason` on `block`/`unblock`/`release` is a FILE path, not free text.**
+  Point it at a markdown blocker/rationale file.
+- **`close --reason` accepts only `completed` or `not-planned`.** Any other value
+  fails with `unknown close reason`.
+- **A `needs-human`/`maintainer-blocked` ticket cannot be closed** until you run
+  `unblock ISSUE --reason FILE [--agent NAME]` (clears both labels; `--agent`
+  re-leases so you can close in one step). This is the inverse of `block`;
+  `block --release` only frees the lease, it does NOT clear the labels.
+- **Only pass `--label` values that exist in the repo.** The wrapper now drops
+  unknown labels with a warning instead of aborting the create, but run
+  `ensure-labels` once per repo to create the canonical set first.
+
+## Rules
+
+- Do not file vague tickets. Missing target or proof becomes `triage`.
+- Prefer one independently verifiable acceptance criterion per ticket.
+- For monitor-created maintenance tickets, use the monitor finding as the
+  current state and the focused re-audit command as required proof.
+- Use `fleet --dry-run` review before `fleet --apply`.
+- Do not close without a non-empty proof file and a leased issue.
+- If a project-watchdog closure audit returns `VERDICT: NEEDS_ATTENTION`, the ticket is not verified; reopen or block it for human review rather than leaving it closed as completed.
+- Default to local deterministic proof; do not run GitHub Actions unless the
+  ticket acceptance criteria, changed CI/workflow files, remote-only behavior,
+  or explicit human instruction require it.
+- GitHub Actions evidence is optional corroboration; CI green alone is not
+  closure proof.
+- Do not use this skill to bypass `$best-practices-github-ticket`.
+
+## Ecosystem
+
+Adjacent agent-governance boundary. Produces ticket proof and closure evidence; consumes `pi.agent_status.v1` proof claims from resolvers. When a ticket remains open or closure proof is incomplete, emit or validate `lazy_report_shame.continuation_guard.v1` via `skills/shame/run.sh guard` so `$shame` rejects terminal `done` reports until machine-readable work is closed.

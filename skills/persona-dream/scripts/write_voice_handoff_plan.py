@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""Write a hash-bound post-mux voice handoff plan for an active revision."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Mapping
+
+from audio_strategy_gate import VOICE_HANDOFF_RELATIVE, VOICE_HANDOFF_SCHEMA, assess_revision_audio_strategy
+
+KAI_AMBIENT_WAV = Path(
+    "/mnt/storage12tb/media/personas/shared/embry_kai/assets/youtube/ocean_raw_surfing_audio_2min.wav"
+)
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
+    payload = (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
+
+
+def resolve_storyboard_timing(entry: Mapping[str, Any], shot_bible: Mapping[str, Any]) -> dict[str, Any]:
+    beat_id = str(entry.get("storyboard_beat_id") or "")
+    shots = shot_bible.get("shots")
+    if not beat_id or not isinstance(shots, list):
+        raise SystemExit("spoken transcript line is missing a storyboard beat binding")
+    shot = next(
+        (item for item in shots if isinstance(item, Mapping) and item.get("panel_id") == beat_id),
+        None,
+    )
+    if not isinstance(shot, Mapping):
+        raise SystemExit(f"spoken transcript storyboard beat does not exist: {beat_id}")
+    time_range = shot.get("time_range_s")
+    if not isinstance(time_range, Mapping):
+        raise SystemExit(f"storyboard beat has no time range: {beat_id}")
+    beat_start = float(time_range["start_s"])
+    beat_end = float(time_range["end_s"])
+    line_start = float(entry["start_s"])
+    line_end = float(entry["end_s"])
+    if not beat_start <= line_start < beat_end:
+        raise SystemExit(
+            f"spoken transcript onset {line_start} is outside storyboard beat {beat_id} "
+            f"[{beat_start}, {beat_end})"
+        )
+    if line_end <= line_start:
+        raise SystemExit("spoken transcript line has a non-positive interval")
+    return {
+        "storyboard_beat_id": beat_id,
+        "beat_start_s": beat_start,
+        "beat_end_s": beat_end,
+        "line_start_s": line_start,
+        "line_end_s": line_end,
+    }
+
+
+def build_plan(
+    revision_root: Path,
+    ambient_wav: Path = KAI_AMBIENT_WAV,
+    render_receipt_path: Path | None = None,
+    request_body_sha256_pending: bool = False,
+) -> dict[str, Any]:
+    transcript_path = revision_root / "phase_06_script/timed_transcript.json"
+    shot_bible_path = revision_root / "phase_03_crew/shot_bible.json"
+    audition_path = revision_root / "phase_05_voices/kai_voice_audition.json"
+    request_path = revision_root / "phase_11_submit_return/canonical/phase11_live_request.v1.json"
+    required_sources = [transcript_path, shot_bible_path, audition_path, ambient_wav]
+    # In deferred-binding mode the compiled canonical request does not exist yet
+    # (it is produced downstream of this plan); its request_body_sha256 is rebound
+    # after compile by rebind_voice_handoff_binding.py. Do not require it here.
+    if not request_body_sha256_pending:
+        required_sources.append(request_path)
+    for required in required_sources:
+        if not required.is_file():
+            raise SystemExit(f"required handoff source missing: {required}")
+
+    transcript = read_json(transcript_path)
+    shot_bible = read_json(shot_bible_path)
+    audition = read_json(audition_path)
+    if request_body_sha256_pending:
+        request_sha = ""
+    else:
+        request = read_json(request_path)
+        request_sha = str((request.get("approval_bindings") or {}).get("request_body_sha256") or "")
+    reference_path = Path(str(audition.get("ref_audio") or ""))
+    if not reference_path.is_file():
+        raise SystemExit(f"Kai conditioning reference missing: {reference_path}")
+
+    render_receipt = read_json(render_receipt_path) if render_receipt_path else None
+    rendered_audio: dict[str, Any] | None = None
+    if isinstance(render_receipt, Mapping):
+        rendered_path = Path(str(render_receipt.get("output_wav") or ""))
+        if not rendered_path.is_file():
+            raise SystemExit(f"exact-line rendered WAV missing: {rendered_path}")
+        rendered_audio = {
+            "path": str(rendered_path),
+            "sha256": sha256_file(rendered_path),
+            "size_bytes": rendered_path.stat().st_size,
+            "receipt_path": str(render_receipt_path),
+            "receipt_sha256": sha256_file(render_receipt_path),
+            "duration_seconds": (render_receipt.get("chatterbox_receipt") or {}).get("duration_seconds"),
+        }
+
+    lines = []
+    for entry in transcript:
+        if isinstance(entry, Mapping) and entry.get("speaker") and entry.get("text"):
+            canonical_text = str(entry["text"])
+            timing = resolve_storyboard_timing(entry, shot_bible)
+            if isinstance(render_receipt, Mapping):
+                if render_receipt.get("mocked") is not False or render_receipt.get("live") is not True:
+                    raise SystemExit("exact-line receipt is not live non-mocked evidence")
+                if render_receipt.get("character") != str(entry["speaker"]).casefold():
+                    raise SystemExit("exact-line receipt speaker mismatch")
+                if render_receipt.get("answer_text") != canonical_text:
+                    raise SystemExit("exact-line receipt text does not match timed transcript")
+            lines.append(
+                {
+                    "speaker": str(entry["speaker"]),
+                    "text": canonical_text,
+                    "start_s": float(entry["start_s"]),
+                    "end_s": float(entry["end_s"]),
+                    "storyboard_beat_id": timing["storyboard_beat_id"],
+                    "storyboard_beat_start_s": timing["beat_start_s"],
+                    "storyboard_beat_end_s": timing["beat_end_s"],
+                    "voice_direction": str(entry.get("voice_direction") or ""),
+                    "render_status": "PASS_EXACT_LINE_RENDER" if rendered_audio else "PENDING_EXACT_LINE_RENDER",
+                    "rendered_audio": rendered_audio,
+                }
+            )
+    if not lines:
+        raise SystemExit("timed transcript has no spoken lines")
+
+    audition_text = str(audition.get("tts_render_text") or "")
+    exact_match = len(lines) == 1 and audition_text == lines[0]["text"]
+    plan = {
+        "schema": VOICE_HANDOFF_SCHEMA,
+        "status": "PASS_EXACT_LINE_RENDER_READY_FOR_MUX" if rendered_audio else "BLOCKED_AWAITING_EXACT_LINE_RENDER",
+        "run_id": "pipeline-complete",
+        "revision_id": revision_root.name,
+        "strategy": "post_mux",
+        "delivery_mode": "post_mux",
+        "provider_request": {
+            "request_body_sha256": request_sha,
+            "generate_audio": False,
+            "dialogue_in_provider_prompts": False,
+        },
+        "request_binding": {
+            "status": "PENDING_COMPILE" if request_body_sha256_pending else "BOUND",
+            "request_body_sha256": request_sha or None,
+            "canonical_relative_path": "phase_11_submit_return/canonical/phase11_live_request.v1.json",
+            "note": (
+                "Deferred: request_body_sha256 is bound after compile by "
+                "rebind_voice_handoff_binding.py; the audio-strategy gate rejects a "
+                "PENDING_COMPILE plan once the canonical exists (fail closed)."
+                if request_body_sha256_pending
+                else "Bound at write time to the compiled canonical request_body_sha256."
+            ),
+        },
+        "timed_transcript": {
+            "revision_relative_path": "phase_06_script/timed_transcript.json",
+            "sha256": sha256_file(transcript_path),
+            "source_of_truth": True,
+        },
+        "storyboard_timing": {
+            "revision_relative_path": "phase_03_crew/shot_bible.json",
+            "sha256": sha256_file(shot_bible_path),
+        },
+        "lines": lines,
+        "voice_bindings": {
+            "Kai": {
+                "engine": str((audition.get("chatterbox_receipt") or {}).get("engine") or "chatterbox_turbo"),
+                "source_receipt_relative_path": "phase_05_voices/kai_voice_audition.json",
+                "source_receipt_sha256": sha256_file(audition_path),
+                "conditioning_reference": {
+                    "path": str(reference_path),
+                    "sha256": sha256_file(reference_path),
+                    "size_bytes": reference_path.stat().st_size,
+                    "role": "conditioning_reference_only",
+                },
+                "audition_text": audition_text,
+                "canonical_line_match": exact_match,
+                "reuse_audition_as_final_dialogue": False,
+            }
+        },
+        "ambient_beds": [
+            {
+                "path": str(ambient_wav),
+                "sha256": sha256_file(ambient_wav),
+                "size_bytes": ambient_wav.stat().st_size,
+                "role": "ocean_surf_wind_reference_and_mix_bed",
+            }
+        ],
+        "required_outputs": [
+            "exact_line_render.wav",
+            "exact_line_render_ffprobe_receipt.json",
+            "audio_mix.wav",
+            "audio_mix_receipt.json",
+            "muxed_provider_return.mp4",
+            "ffmpeg_mux_receipt.json",
+            "muxed_provider_return_ffprobe_receipt.json",
+            "audible_output_review_receipt.json",
+            "dialogue_sync_receipt.json",
+        ],
+        "gates": {
+            "pre_submit": [
+                "provider request generate_audio=false",
+                "timed transcript path and hash verify",
+                "every voice and ambient reference path and hash verify",
+                "every spoken-line onset is inside its bound storyboard beat",
+            ],
+            "post_return": [
+                "exact rendered line equals timed transcript text",
+                "final MP4 contains an audio stream",
+                "final MP4 has audible output",
+                "mux and ffprobe receipts bind final MP4 hash",
+                "dialogue sync receipt binds the rendered duration and storyboard onset",
+            ],
+        },
+        "optional_lipsync": {
+            "enabled": False,
+            "endpoint": "fal-ai/kling-video/lipsync/audio-to-video",
+            "requires_separate_paid_authorization": True,
+        },
+        "mocked": False,
+        "live": True,
+        "claims": {
+            "proves": [
+                "the post-mux strategy is explicit and bound to the active revision, exact transcript, provider request, voice reference, and ambient bed",
+                *(["a live non-mocked Chatterbox render reproduces the canonical transcript line exactly and is bound by WAV and receipt hashes"] if rendered_audio else []),
+            ],
+            "does_not_prove": [
+                *([] if rendered_audio else ["the canonical line has been rendered"]),
+                "the active repaired Kling request has been submitted",
+                "audio has been mixed or muxed",
+                "the final video has audible output",
+            ],
+        },
+    }
+    return plan
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("revision_root", type=Path)
+    parser.add_argument("--ambient-wav", type=Path, default=KAI_AMBIENT_WAV)
+    parser.add_argument("--render-receipt", type=Path)
+    parser.add_argument(
+        "--request-body-sha256-pending",
+        action="store_true",
+        help=(
+            "Defer the compiled-canonical request_body_sha256 binding (breaks the "
+            "voiced-run phase-11 ordering cycle). Writes request_binding.status="
+            "PENDING_COMPILE; rebind after compile with rebind_voice_handoff_binding.py."
+        ),
+    )
+    args = parser.parse_args()
+    revision_root = args.revision_root.expanduser().resolve()
+    output = revision_root / VOICE_HANDOFF_RELATIVE
+    render_receipt = args.render_receipt.expanduser().resolve() if args.render_receipt else None
+    atomic_write_json(
+        output,
+        build_plan(
+            revision_root,
+            args.ambient_wav.expanduser().resolve(),
+            render_receipt,
+            request_body_sha256_pending=args.request_body_sha256_pending,
+        ),
+    )
+    assessment = assess_revision_audio_strategy(revision_root)
+    print(json.dumps({"path": str(output), "sha256": sha256_file(output), "assessment": assessment.to_dict()}, indent=2))
+    return 0 if assessment.voice_handoff_valid else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

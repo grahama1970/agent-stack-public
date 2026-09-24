@@ -1,0 +1,73 @@
+{
+  "schema": "persona_dream.revision_dependency_graph.v1",
+  "description": "Declared dependency graph over revision artifact index ids. The edit-intent plan compiler classifies artifacts as regenerate/revalidate/stale/reuse by walking these declared edges; any index artifact matched by no rule has unknown dependency coverage, which blocks selective-execution claims. Edges follow the proven invalidation semantics of scripts/create_successor_revision.py (identity source -> storyboard frames -> storyboard packet -> media lock -> provider packet).",
+  "rules": [
+    {
+      "id": "identity_source",
+      "match": "contact_sheet_manifest",
+      "class": "identity_source",
+      "depends_on": [],
+      "note": "Accepted contact-sheet identity source; per create_successor_revision.py the successor identity binding derives from the durable qualification receipt. Edit intents never target it (out of scope)."
+    },
+    {
+      "id": "frame_start",
+      "match": "sb_*.start_frame",
+      "class": "frame",
+      "depends_on": ["contact_sheet_manifest"],
+      "note": "Storyboard panel start frames derive from the accepted identity source (see STALE_TARGET_ARTIFACTS in create_successor_revision.py)."
+    },
+    {
+      "id": "frame_end",
+      "match": "sb_*.end_frame",
+      "class": "frame",
+      "depends_on": ["contact_sheet_manifest"],
+      "note": "Storyboard panel end frames derive from the accepted identity source."
+    },
+    {
+      "id": "storyboard_packet",
+      "match": "storyboard_packet",
+      "class": "derivation",
+      "depends_on": ["sb_*.start_frame", "sb_*.end_frame"],
+      "note": "Storyboard packet consumes every panel frame."
+    },
+    {
+      "id": "media_lock",
+      "match": "media_lock",
+      "class": "derivation",
+      "depends_on": ["storyboard_packet", "sb_*.start_frame", "sb_*.end_frame"],
+      "note": "Media lock binds the storyboard packet and its frames (phase_08_media_lock/storyboard_media_lock_manifest.json)."
+    },
+    {
+      "id": "frame_generation_receipts",
+      "match": "phase07.*receipts*sb.*.scillm.image.generation.receipt.json",
+      "class": "evidence",
+      "depends_on": ["sb_*.start_frame", "sb_*.end_frame"],
+      "note": "Per-frame generation receipts document the generation event of a specific frame; when that frame is replaced they become stale historical evidence, never silently reused."
+    },
+    {
+      "id": "provider_packet",
+      "match": "phase11.*canonical*phase11.live.request.v1.json",
+      "class": "evidence",
+      "depends_on": ["media_lock"],
+      "note": "Provider packets derive from the media lock; per STALE_SOURCE_ARTIFACTS in create_successor_revision.py they are superseded historical evidence, not reusable."
+    },
+    {
+      "id": "human_idea",
+      "match": "human_idea",
+      "class": "independent",
+      "depends_on": [],
+      "note": "Phase 01 idea artifacts are upstream of all panel work; a panel edit never affects them."
+    },
+    {
+      "id": "dream_request",
+      "match": "dream_request",
+      "class": "independent",
+      "depends_on": [],
+      "note": "Phase 01 idea artifacts are upstream of all panel work; a panel edit never affects them."
+    }
+  ],
+  "catch_all": {
+    "coverage": "unknown",
+    "note": "Index artifacts matched by no rule have unknown dependency coverage. The plan compiler still emits a plan, but selective_execution.claimed is false and blocked_by carries BLOCKED_COVERAGE_UNKNOWN_DEPENDENCY."
+  }
+}

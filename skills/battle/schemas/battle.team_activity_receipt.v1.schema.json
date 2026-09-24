@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.team_activity_receipt.v1",
+  "title": "Battle team activity receipt v1",
+  "type": "object",
+  "required": ["schema", "status", "battle_id", "run_id", "team", "required_activity_ids", "execution_window", "campaign_clock", "activities"],
+  "properties": {
+    "schema": {"const": "battle.team_activity_receipt.v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "battle_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "team": {"enum": ["red", "blue"]},
+    "required_activity_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "execution_window": {"type": "object"},
+    "campaign_clock": {"type": "string", "minLength": 1},
+    "activities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["activity_id", "lane_id", "team", "activity_kind", "model_provenance", "persona_provenance", "inputs", "iteration", "artifact_refs", "terminal_disposition", "timing"],
+        "properties": {
+          "activity_id": {"type": "string", "minLength": 1},
+          "lane_id": {"type": "string", "minLength": 1},
+          "team": {"enum": ["red", "blue"]},
+          "activity_kind": {"type": "string", "minLength": 1},
+          "model_provenance": {"type": "object"},
+          "persona_provenance": {"type": "object"},
+          "inputs": {"type": "array"},
+          "observations": {"type": "array"},
+          "research_refs": {"type": "array"},
+          "iteration": {"type": "object"},
+          "artifact_refs": {"type": "array"},
+          "terminal_disposition": {"type": "object"},
+          "timing": {
+            "type": "object",
+            "required": ["clock", "start_monotonic_ns", "end_monotonic_ns", "duration_breakdown"],
+            "properties": {
+              "clock": {"const": "monotonic_ns"},
+              "start_monotonic_ns": {"type": "integer"},
+              "end_monotonic_ns": {"type": "integer"},
+              "duration_breakdown": {
+                "type": "object",
+                "required": ["queue_seconds", "provider_seconds", "build_seconds", "runtime_seconds", "replay_seconds"]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

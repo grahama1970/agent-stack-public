@@ -1,0 +1,320 @@
+@import 'tailwindcss';
+@import './responsive.css';
+
+/* shadcn design tokens (Tailwind v4 is CSS-first: no tailwind.config.js).
+   Values are the deck's own house palette so primitives inherit the product
+   look rather than shadcn's slate defaults. */
+:root {
+  --background: #ffffff;
+  --foreground: #292929;
+  --card: #ffffff;
+  --card-foreground: #292929;
+  --primary: #076889;          /* measured house band fill */
+  --primary-foreground: #ffffff;
+  --secondary: #eef3f6;
+  --secondary-foreground: #0c3d50;
+  --accent: #eef3f6;
+  --accent-foreground: #0c3d50;
+  --destructive: #b3261e;
+  --border: #d6dee3;
+  --ring: #1d7694;             /* measured house accent */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0c0908;
+    --foreground: #ece2d3;
+    --card: #151110;
+    --card-foreground: #ece2d3;
+    --secondary: #1d2a30;
+    --secondary-foreground: #ece2d3;
+    --accent: #1d2a30;
+    --accent-foreground: #ece2d3;
+    --border: #2b3940;
+  }
+}
+
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0a0f14;
+  color: #e6edf3;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* Font unification (roundtable 10-partial): slide CONTENT uses the same
+   family the PPTX builder emits (Arial), so wrap points converge; app chrome
+   keeps the system font. */
+.deck-font,
+.deck-font * {
+  font-family: var(--deck-body-font, Arial), 'Helvetica Neue', Helvetica, sans-serif;
+}
+.deck-font h1,
+.deck-font h2 {
+  font-family: var(--deck-heading-font, Arial), 'Helvetica Neue', Helvetica, sans-serif;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+
+/* Per-slide transitions — data-driven from SlideSpec.transition. */
+.anim-slide-fwd {
+  animation: slide-in var(--deck-transition, 300ms) ease both;
+}
+.anim-slide-back {
+  animation: slide-in-back var(--deck-transition, 300ms) ease both;
+}
+.anim-slide_up-fwd,
+.anim-slide_up-back {
+  animation: slide-up-in var(--deck-transition, 300ms) ease both;
+}
+.anim-fade-fwd,
+.anim-fade-back {
+  animation: fade-in var(--deck-transition, 320ms) ease both;
+}
+.anim-zoom-fwd,
+.anim-zoom-back {
+  animation: zoom-in var(--deck-transition, 340ms) cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    translate: 48px 0;
+  }
+}
+@keyframes slide-in-back {
+  from {
+    opacity: 0;
+    translate: -48px 0;
+  }
+}
+@keyframes slide-up-in {
+  from {
+    opacity: 0;
+    translate: 0 56px;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+.anim-flip-fwd,
+.anim-flip-back {
+  animation: flip-in-y var(--deck-transition, 500ms) cubic-bezier(0.16, 1, 0.3, 1) both;
+  backface-visibility: hidden;
+  transform-style: preserve-3d;
+}
+.anim-wipe-fwd,
+.anim-wipe-back {
+  animation: wipe-in-left var(--deck-transition, 500ms) cubic-bezier(0.25, 1, 0.5, 1) both;
+}
+@keyframes flip-in-y {
+  from {
+    opacity: 0;
+    transform: perspective(1200px) rotateY(-90deg);
+  }
+  to {
+    transform: perspective(1200px) rotateY(0deg);
+  }
+}
+@keyframes wipe-in-left {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+@keyframes zoom-in {
+  from {
+    opacity: 0;
+    scale: 0.94;
+  }
+}
+
+/* Content reveals — data-driven from SlideSpec.reveal; --i is item index. */
+.reveal-stagger_up > * {
+  opacity: 0;
+  animation: reveal-up 460ms ease forwards;
+  animation-delay: calc(160ms + var(--i, 0) * 110ms);
+}
+.reveal-stagger_fade > * {
+  opacity: 0;
+  animation: fade-in-item 520ms ease forwards;
+  animation-delay: calc(160ms + var(--i, 0) * 110ms);
+}
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    translate: 0 22px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+@keyframes fade-in-item {
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [class^='anim-'],
+  [class*=' anim-'] {
+    animation: none;
+  }
+  .reveal-stagger_up > *,
+  .reveal-stagger_fade > * {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* Per-element entrance animations — typed manifest data (FreeformElement.entrance). */
+.entrance-fade {
+  animation: fade-in 500ms ease both;
+}
+.entrance-rise {
+  animation: slide-up-in 500ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.entrance-zoom {
+  animation: zoom-in 450ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .entrance-fade,
+  .entrance-rise,
+  .entrance-zoom {
+    animation: none;
+  }
+}
+
+/* Click-gated builds (reveal: step) — fragments hidden until stepped in. */
+.fragment-hidden {
+  opacity: 0;
+  visibility: hidden;
+}
+.fragment-in {
+  animation: slide-up-in 340ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fragment-in {
+    animation: none;
+  }
+}
+
+/* Dark-theme scrollbars (user spec): thin slate thumbs on transparent tracks —
+   native scrollbars glare in a slate-950 UI and waste horizontal width. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: #334155;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #475569;
+}
+
+@layer utilities {
+  /* Hide the scrollbar entirely while keeping scrollability (filmstrip, code blocks). */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  /* Sleek 4px micro-scrollbar for tight sidebars */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: #1e293b;
+    border-radius: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background-color: #334155;
+  }
+  /* Auto-hiding scrollbar: transparent until the container is hovered;
+     scrollbar-gutter keeps layout stable when it appears. */
+  .hover-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    scrollbar-gutter: stable;
+  }
+  .hover-scrollbar::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  .hover-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .hover-scrollbar::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border-radius: 9999px;
+    transition: background-color 0.2s ease;
+  }
+  .hover-scrollbar:hover {
+    scrollbar-color: #334155 transparent;
+  }
+  .hover-scrollbar:hover::-webkit-scrollbar-thumb {
+    background-color: #334155;
+  }
+  .hover-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: #475569 !important;
+  }
+}
+
+@font-face { font-family: Fraunces; src: url('/fonts/fraunces-site-subset.woff2') format('woff2'); font-weight: 100 900; font-style: normal; font-display: swap; }
+.freeform-band, [data-deck-theme=custom] .deck-font :is(h1,h2) { isolation: isolate; overflow: hidden; }
+[data-deck-theme=custom] .deck-font :is(h1,h2) { position: relative; }
+.freeform-band::before, [data-deck-theme=custom] .deck-font :is(h1,h2)::before { content: ''; position: absolute; inset: -8% -9%; z-index: -1; pointer-events: none; background: url('/theme-assets/house-band-texture.png') center / 100% 100% no-repeat; opacity: var(--deck-header-image-opacity, 0.1); }
+.theme-picker { position: relative; font-family: system-ui, sans-serif; }
+.theme-swatch { display: inline-block; width: 14px; height: 14px; border: 1px solid #a99787; border-radius: 3px; }
+.theme-panel { position: absolute; right: 0; top: 100%; z-index: 100; width: min(350px, 90vw); max-height: 70vh; overflow: auto; padding: 16px; border: 1px solid #a99787; background: #110d0b; color: #ece2d3; box-shadow: 0 12px 32px #0009; }
+.theme-panel label { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 8px 0; }
+.theme-panel p { font-size: 12px; line-height: 1.5; }
+.theme-panel select, .theme-panel input:not([type=color]):not([type=range]) { background: #211917; color: #ece2d3; border: 1px solid #a99787; max-width: 190px; padding: 4px; }
+.theme-panel summary { cursor: pointer; padding: 8px 0; }
+.theme-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.theme-actions { position: sticky; bottom: -16px; z-index: 1; display: flex; gap: 8px; margin: 12px -16px -16px; padding: 12px 16px; background: #110d0b; border-top: 1px solid #a99787; }
+.theme-error { max-width: 350px; font-size: 12px; color: #ffaca0; }
+[data-deck-theme=custom] { --deck-diagram-accent: var(--deck-accent); --deck-diagram-canvas: var(--deck-canvas); --deck-element-text: var(--deck-text); --deck-header-background: color-mix(in srgb, var(--deck-header) calc(var(--deck-header-opacity) * 100%), transparent); }
+[data-deck-theme=custom] .deck-font, [data-deck-theme=custom] .freeform-slide { background: var(--deck-canvas); color: var(--deck-text); }
+[data-deck-theme=custom] .deck-font > div { background: var(--deck-canvas); }
+[data-deck-theme=custom] .deck-font :is(h1,h2) { color: var(--deck-header-text); background: var(--deck-header-background); }
+[data-deck-theme=custom] .deck-font :is(.text-white,.text-slate-200,.text-slate-300) { color: var(--deck-text); }
+[data-deck-theme=custom] .deck-font :is(.text-slate-400,.text-slate-500) { color: var(--deck-muted); }
+[data-deck-theme=custom] .deck-font [class*="border-cyan"] { border-color: var(--deck-accent); }
+[data-deck-theme=custom] .deck-font [class*="bg-slate-800"] { background: color-mix(in srgb, var(--deck-text) 8%, var(--deck-canvas)); }
+[data-deck-theme=custom] .deck-font [class*="bg-cyan-500"] { background: color-mix(in srgb, var(--deck-accent) 10%, var(--deck-canvas)); }
+
+.animation-panel.theme-panel { width: min(900px, 94vw); max-height: 88vh; overflow-y: auto; }
+.animation-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.animation-columns fieldset { max-height: 180px; overflow: auto; }
+.animation-columns fieldset label { display: flex; gap: 8px; align-items: center; }
+.animation-columns fieldset input { width: auto; }
+.animation-columns ol { max-height: 180px; overflow: auto; padding-left: 24px; }
+.animation-columns button[aria-pressed=true] { outline: 2px solid #22d3ee; }
+.animation-preview { height: 280px; width: 100%; }
+@media (max-width: 650px) { .animation-columns { grid-template-columns: 1fr; } }

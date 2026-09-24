@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-skills.local/battle/schemas/battle.provider_artifact_continuity_receipt.v1.schema.json",
+  "title": "Battle Provider Artifact Continuity Receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "mocked",
+    "fixture_fallback_used",
+    "provider_live",
+    "observed_provider",
+    "observed_model",
+    "hashes",
+    "verified_equal",
+    "repair_lineage",
+    "checks",
+    "errors",
+    "claims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "battle.provider_artifact_continuity_receipt.v1"
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "BLOCKED",
+        "FAIL"
+      ]
+    },
+    "mocked": {
+      "const": false
+    },
+    "fixture_fallback_used": {
+      "const": false
+    },
+    "provider_live": {
+      "type": "boolean"
+    },
+    "observed_provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "observed_model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hashes": {
+      "type": "object",
+      "properties": {
+        "provider_authorship_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "specimen_metadata_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "provider_file_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "compile_source_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "compile_input_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "docker_specimen_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "judge_target_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "verified_equal": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "claims": {
+      "type": "object",
+      "required": [
+        "proves",
+        "does_not_prove"
+      ],
+      "properties": {
+        "proves": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "does_not_prove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "repair_lineage": {
+      "type": "object",
+      "required": [
+        "repaired",
+        "valid"
+      ],
+      "properties": {
+        "repaired": {
+          "type": "boolean"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "provider_artifact_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected_artifact_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authorization_chain_length": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

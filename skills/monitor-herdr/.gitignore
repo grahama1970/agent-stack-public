@@ -1,0 +1,7 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+# symlink to /mnt/storage12tb per the storage policy; the '.venv/' pattern
+# above matches directories only, not symlinks.
+.venv

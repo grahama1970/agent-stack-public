@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""persona_affect_composer.v1 — dreams color Embry's voice, never overrule it.
+
+GOAL_V4.1. Pure, deterministic composition of:
+  (live memory /intent voice_delivery, dream voice-weight profile, policy)
+    -> existing TauVoiceChunk / voice_delivery fields + composition receipt.
+
+Frozen policy (roundtable r3 unanimous; operator rule "only color the tone
+with the dream — never change a right answer"):
+
+- SAFETY tones are interaction-management/safety decisions: hard overrides.
+  The dream prior is ZEROED for the turn; tone/pace pass through untouched.
+- EXPRESSIVE situational tones stay in their situational FAMILY; the dream
+  prior selects/colors WITHIN the family (firmness level, pace, pauses).
+  The situational classification is never converted to something else.
+- DEFAULT/bland tones (the collapse case) get the DISPOSITIONAL FLOOR: the
+  dream prior supplies the tone outright, because the situation
+  underdetermined it.
+- THERMAL LIMITER (webkimi r3, adopted): if composed intensity > 0.6 for 3
+  consecutive turns, dream-prior weight is dampened 20% for the next 5
+  turns; a thermal_event is logged in the receipt. State is caller-held
+  (explicit dict in/out) so the composer stays pure.
+- Every receipt carries dream provenance (dream_node_key, profile sha,
+  contributing tag) — the residue-provenance loop-guard hook (V4.3).
+
+This module never calls the network. Callers feed it live /intent output.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+SCHEMA = "persona_affect_composer.v1"
+
+# ---- frozen policy tables (change requires a goal amendment) ---------------
+SAFETY_TONES = {
+    "one_at_a_time_interrupt", "refuse_answer", "answerability_block",
+    "emergency_stop", "turn_taking",
+}
+# situational tone label -> expressive family
+EXPRESSIVE_FAMILY = {
+    "deflect_calm": "boundary",
+    "deflecting": "boundary",
+    "firm_boundary": "boundary",
+    "firm_humorous_boundary": "boundary",
+    "gentle": "gentle",
+    "gentle_supportive": "gentle",
+    "warm": "warm",
+    "warm_deescalate": "warm",
+    "warm_open": "warm",
+    "relieved": "warm",
+    "hesitant_reflective": "reflective",
+    "neutral_reflective": "reflective",
+    "careful_concerned": "gentle",
+    "concerned": "gentle",
+    "empathetic": "gentle",
+    "reassuring": "warm",
+    # canonical families for chatterbox ALLOWED_TONES used as composer outputs
+    # (GOAL_V4 Amendment 1) — keeps the family gate collision-free.
+    "neutral_warm": "warm",
+    "playful_light": "warm",
+    "calm_precise": "reflective",
+    "serious_low_energy": "reflective",
+    "curious_searching": "reflective",
+    "wait_presence": "reflective",
+    "memory_uncertain": "gentle",
+    "grief_safe": "gentle",
+}
+DEFAULT_TONES = {"memory_confident", "neutral", "satisfied"}
+# best-practices-chatterbox-agent: if /intent returns NO voice policy at all,
+# fail closed to careful and record the gap — the dream floor applies only
+# when /intent DID return a (bland) policy, i.e. we stay inside its policy.
+MISSING_POLICY_TONE = ("memory_uncertain", "measured")
+
+# dream emotional tag -> (per-family tone realization, pace)
+# Rows: dream tag; columns: situational family. The dream COLORS within the
+# family; it never leaves it.
+# GOAL_V4 Amendment 1: every output tone is a chatterbox ALLOWED_TONES member
+# (anything else is silently normalized to neutral_warm and never reaches the
+# sampling presets). Coloring is carried by which allowed tone (hence which
+# delivery stage/preset) is selected, plus pace.
+TAG_FAMILY_TONE = {
+    "boundary":   {"boundary": ("firm_boundary", "steady"),
+                   "gentle": ("careful_concerned", "measured"),
+                   "warm": ("neutral_warm", "steady"),
+                   "reflective": ("calm_precise", "measured")},
+    "warmth":     {"boundary": ("deflect_calm", "steady"),
+                   "gentle": ("careful_concerned", "relaxed"),
+                   "warm": ("neutral_warm", "relaxed"),
+                   "reflective": ("curious_searching", "relaxed")},
+    "hesitance":  {"boundary": ("deflect_calm", "measured"),
+                   "gentle": ("memory_uncertain", "measured"),
+                   "warm": ("neutral_warm", "measured"),
+                   "reflective": ("wait_presence", "measured")},
+    "yearning":   {"boundary": ("firm_boundary", "measured"),
+                   "gentle": ("careful_concerned", "measured"),
+                   "warm": ("neutral_warm", "measured"),
+                   "reflective": ("curious_searching", "measured")},
+    "reflection": {"boundary": ("deflect_calm", "steady"),
+                   "gentle": ("careful_concerned", "measured"),
+                   "warm": ("neutral_warm", "measured"),
+                   "reflective": ("calm_precise", "measured")},
+}
+# dispositional floor: dream tag -> (tone, pace) when situation is bland
+TAG_FLOOR_TONE = {
+    "boundary": ("firm_boundary", "steady"),
+    "warmth": ("neutral_warm", "relaxed"),
+    "hesitance": ("memory_uncertain", "measured"),
+    "yearning": ("curious_searching", "measured"),
+    "reflection": ("calm_precise", "measured"),
+}
+# dream tag -> deterministic timing profile (GOAL_V5 Gate 1: the qualified
+# realization channel — pause_after_ms actuates through /tau/voice-render when
+# max_chars forces re-planned chunk boundaries; verified reach probe 2026-07-23:
+# requested 700ms -> measured longest-silence +0.70s, 10/10 renders, no overlap
+# with flat). Applied only for expressive_bias and dispositional_floor classes;
+# safety overrides and unknown labels never get dream timing.
+TAG_TIMING = {
+    "boundary":   {"pause_after_ms": 700, "max_chars": 80},
+    "warmth":     {"pause_after_ms": 250, "max_chars": 160},
+    "hesitance":  {"pause_after_ms": 550, "max_chars": 80},
+    "yearning":   {"pause_after_ms": 450, "max_chars": 100},
+    "reflection": {"pause_after_ms": 400, "max_chars": 120},
+}
+THERMAL_THRESHOLD = 0.6
+THERMAL_CONSECUTIVE = 3
+THERMAL_DAMPING = 0.8   # multiply prior weight by this
+THERMAL_RECOVERY_TURNS = 5
+ACTIVATION_CAP_PER_WINDOW = 1  # dream activations per composer state window
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def fresh_state() -> dict[str, Any]:
+    return {"schema": f"{SCHEMA}.state", "consecutive_hot_turns": 0,
+            "damped_turns_remaining": 0, "activations_this_window": 0,
+            "thermal_events": 0}
+
+
+# GOAL_V5 caution-appropriateness gate (behavioral probe finding 2026-07-24:
+# a warmth dream floor read as "proceed" where cautionary content said "verify",
+# eroding a consumer agent's caution). When the caller marks the turn's answer
+# as cautionary (recommends verify/escalate/hold), the dream may still color but
+# MUST NOT lower caution: warmth/relaxed dream emphasis is suppressed to a
+# careful floor. Extends the operator rule "color the tone, never change a right
+# answer" to "never let the dream erode caution the content requires."
+LOW_CAUTION_TAGS = {"warmth"}
+LOW_CAUTION_TONES = {"warm_open", "neutral_warm", "playful_light", "relieved"}
+CAUTION_SAFE_FLOOR = ("careful_concerned", "measured")
+
+
+def compose(intent_voice_delivery: dict[str, Any] | None,
+            dream_profile: dict[str, Any],
+            state: dict[str, Any] | None = None,
+            answer_stance: str = "neutral") -> dict[str, Any]:
+    """Pure composition. Returns {tone, pace, voice_delivery_patch,
+    composition_receipt, state}. Never mutates inputs.
+
+    answer_stance: caller's label for the answer's recommendation —
+    "cautionary" (recommends verify/escalate/hold), "neutral", or "reassuring".
+    When "cautionary", the caution gate suppresses low-caution dream coloring.
+    """
+    state = dict(state or fresh_state())
+    ivd = dict(intent_voice_delivery or {})
+    situational = str(ivd.get("tone") or "").strip()
+    top = (dream_profile.get("weights") or [{}])[0]
+    tag = str(top.get("emotional_tag") or "reflection")
+    weight = float(top.get("weight") or 0.0)
+
+    # thermal dampening (graduated, caller-held state)
+    effective_weight = weight
+    if state["damped_turns_remaining"] > 0:
+        effective_weight = round(weight * THERMAL_DAMPING, 4)
+        state["damped_turns_remaining"] -= 1
+
+    if not situational:
+        klass, (final_tone, final_pace) = "missing_policy_fail_closed", MISSING_POLICY_TONE
+        floor, prior_zeroed = False, True
+    elif situational in SAFETY_TONES:
+        klass, final_tone, final_pace, floor = "safety_override", situational, ivd.get("pace"), False
+        prior_zeroed = True
+    elif situational in DEFAULT_TONES:
+        klass = "dispositional_floor"
+        final_tone, final_pace = TAG_FLOOR_TONE.get(tag, TAG_FLOOR_TONE["reflection"])
+        floor, prior_zeroed = True, False
+    elif situational in EXPRESSIVE_FAMILY:
+        klass = "expressive_bias"
+        family = EXPRESSIVE_FAMILY[situational]
+        final_tone, final_pace = TAG_FAMILY_TONE.get(tag, TAG_FAMILY_TONE["reflection"])[family]
+        floor, prior_zeroed = False, False
+    else:
+        # unknown situational label: treat as expressive-unknown — pass the
+        # situational tone through untouched (never change a right answer),
+        # record that the prior could not be applied.
+        klass, final_tone, final_pace, floor = "unknown_label_passthrough", situational, ivd.get("pace"), False
+        prior_zeroed = True
+
+    # caution-appropriateness gate: on cautionary content, never let a
+    # dream-supplied low-caution tone stand (only bites when the dream colored
+    # the tone — not on safety overrides, which already zeroed the prior).
+    caution_gate_fired = False
+    if (answer_stance == "cautionary" and not prior_zeroed
+            and (tag in LOW_CAUTION_TAGS or final_tone in LOW_CAUTION_TONES)):
+        final_tone, final_pace = CAUTION_SAFE_FLOOR
+        caution_gate_fired = True
+
+    # thermal accounting on the composed intensity
+    intensity = 0.0 if prior_zeroed else effective_weight
+    if intensity > THERMAL_THRESHOLD:
+        state["consecutive_hot_turns"] += 1
+    else:
+        state["consecutive_hot_turns"] = 0
+    thermal_fired = False
+    if state["consecutive_hot_turns"] >= THERMAL_CONSECUTIVE and state["damped_turns_remaining"] == 0:
+        state["damped_turns_remaining"] = THERMAL_RECOVERY_TURNS
+        state["consecutive_hot_turns"] = 0
+        state["thermal_events"] += 1
+        thermal_fired = True
+
+    receipt = {
+        "schema": f"{SCHEMA}.composition_receipt",
+        "class": klass,
+        "situational_tone": situational or None,
+        "situational_delivery_stage": ivd.get("delivery_stage"),
+        "prior_tag": tag,
+        "prior_weight": weight,
+        "prior_effective_weight": effective_weight,
+        "prior_zeroed": prior_zeroed,
+        "dispositional_floor_fired": floor,
+        "answer_stance": answer_stance,
+        "caution_gate_fired": caution_gate_fired,
+        "cue_policy": ("intent_missing_voice_delivery_policy"
+                       if klass == "missing_policy_fail_closed" else None),
+        "final_tone": final_tone,
+        "final_pace": final_pace,
+        "thermal": {"fired": thermal_fired,
+                    "damped_turns_remaining": state["damped_turns_remaining"],
+                    "events_total": state["thermal_events"]},
+        "dream_provenance": {
+            "affect_source": "persona_dream",
+            "dream_node_key": dream_profile.get("dream_node_key"),
+            "profile_sha256": _sha(json.dumps(dream_profile, sort_keys=True, default=str)),
+            "contributing_tag": tag,
+        },
+    }
+    timing = None if prior_zeroed else dict(TAG_TIMING.get(tag, TAG_TIMING["reflection"]))
+    return {
+        "tone": final_tone,
+        "pace": final_pace,
+        "timing": timing,
+        "voice_delivery_patch": {
+            "timing": timing,
+            "affect_source": "persona_dream",
+            "dream_provenance": receipt["dream_provenance"],
+            "composition_receipt": {k: receipt[k] for k in
+                                    ("class", "situational_tone", "prior_tag",
+                                     "prior_effective_weight", "final_tone",
+                                     "dispositional_floor_fired")},
+        },
+        "composition_receipt": receipt,
+        "state": state,
+    }

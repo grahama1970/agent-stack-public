@@ -1,0 +1,40 @@
+[project]
+name = "persona-dream"
+version = "0.1.0"
+description = "Receipt-backed persona dream packets and research bakeoff lanes"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fal-client>=0.8.0",
+    "httpx>=0.27.0",
+    "jsonschema>=4.23.0",
+    "numpy>=2.4.6",
+    "pillow>=10.4.0",
+    "PyYAML>=6.0.2",
+    "typer>=0.9.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+# Deterministic ArcFace face-embedding identity subgate (InsightFace buffalo_l).
+# Replaces the unstable VLM face-to-face identity verdict; see
+# scripts/identity_face_embedding_subgate.py and
+# reviewer_calibration_receipt.v4.json. CPU onnxruntime is the deterministic
+# default; swap for onnxruntime-gpu on a free GPU. Install with:
+#   uv pip install -e '.[identity]'
+identity = [
+    "insightface==0.7.3",
+    "onnxruntime==1.19.2",
+]
+# Journal + chat UX service (ux/server.py). Install with:
+#   uv sync --extra ux
+ux = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.9",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100

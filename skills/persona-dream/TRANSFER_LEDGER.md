@@ -1,0 +1,506 @@
+# Persona Dream Transfer Ledger
+
+Every completed experiment records a finding, what it falsified, an
+adopt/constrain/reject decision, a destination repository, and either a
+downstream PR or an explicit no-adoption decision. This ledger satisfies the
+`transfer_record` acceptance criterion of the immutable goal registered with
+`$goal-drift` on 2026-08-03.
+
+A negative, null, or blocking result is a completed result. Nothing in this
+ledger is required to be positive. `Completed` applies only to the named
+experiment: Persona Dream remains a continuous research-and-transfer program.
+Every disposition must either transfer an evidence-bounded change or constraint
+to `$memory`, `$chatterbox-speak`, or bounded personality/emotion state in
+persona-memory, or record why no adoption is warranted, before the next
+experiment begins. The ledger may call a change an improvement only when a
+preregistered target metric beats its baseline while identity, factuality,
+provenance, and synthetic-memory boundaries hold.
+
+The machine-readable source for current research dispositions is
+`DISPOSITION_REGISTRY.json`. This prose ledger is historical context; the strict
+gate is `./run.sh check-dispositions --strict --json`, which recomputes receipt
+hashes and now reports all required hypotheses terminal inside their stated
+proof boundaries. Terminal does not mean universally positive: `BLOCKED_VALID_RESULT`,
+`NULL_OR_TIE`, and retired scope decisions are valid closure outcomes.
+
+The discipline is mechanized, not aspirational. Four gates run in CI and fail
+closed:
+
+- `scripts/check_current_state_consistency.py` — 9 stages over the claim
+  registry, goal, README, evidence surface and handoff. Fails when a claim is
+  PASS without a receipt, when a claim is PASS while its successor issue is
+  open, when a surface restores a superseded goal, or when a claim cites the
+  wrong apparatus.
+- `scripts/check_dispositions.py` — every major hypothesis has a bounded
+  result class, product decision, transfer/no-adoption outcome, and recomputed
+  receipt hash where terminal evidence exists. Apparatus-validity and technical
+  screens cannot be promoted into benefit/perceptual results. Terminal
+  hypotheses close a disposition cycle; they never mark the continuous program
+  finished.
+- `scripts/audit_readme_proof_claims.py` — every proof row on the evidence
+  surface must bind to a named receipt whose status matches the claimed one, and
+  no unproven row may use positive language. One receipt cannot earn two claims.
+- `scripts/generate_readme_research_state.py` — the published research-state
+  block is generated from `CURRENT_STATUS.json`, so prose cannot drift from the
+  machine record.
+
+Claims are written in `CURRENT_STATUS.json` with an explicit `proves` and
+`does_not_prove` pair. The second field is the load-bearing one.
+
+---
+
+## 2026-09-15 — Live persona-memory recall now creates emotional triggers
+
+```text
+Finding:
+The missing trigger seam was real: Persona Dream could recall persona_memory and
+could persist prebuilt triggers, but there was no receipt proving recall output
+became an emotional trigger.
+
+Decision:
+ADOPT. `recall-emotional-triggers` now recalls a persona-scoped experience,
+exactly rereads the selected source document, requires structured emotion and
+intensity, and emits a source/hash-bound trigger for dream consolidation.
+```
+
+- **Evidence:** `local/proofs/memory-recall-emotional-triggers-20260915/live_recall_trigger_receipt.json`
+  = `PASS_MEMORY_RECALL_EMOTIONAL_TRIGGERS`; its output was consumed by
+  `persist-emotional-triggers`, whose exact reread receipt is
+  `local/proofs/memory-recall-emotional-triggers-20260915/live_trigger_persist_receipt.json`.
+  The retained three-trial live/fault-injected evaluation is
+  `local/proofs/memory-recall-emotional-triggers-20260915/agentic_eval_report.json`
+  with capability verdict `PROVEN`.
+- **Destination:** `$memory` `persona_memory` -> `$persona-dream` emotional
+  trigger input. No Chatterbox render is needed to prove this seam.
+- **Does not prove:** durable personality evolution or a later behavioral effect;
+  those are the next closed-loop gates.
+
+---
+
+## #1127 — Blinded listener stimuli are technically confounded
+
+```text
+Finding:
+The existing four-stimulus listener study is technically confounded.
+
+What was falsified:
+The assumption that matched text, reference voice, and requested controls
+were enough to make the conditions perceptually comparable.
+
+Transferable lesson:
+Chatterbox affect studies require neutral-repeat calibration and matched
+loudness, duration, noise-floor, and technical-quality screening.
+
+Decision:
+Reject the existing stimuli; re-render all conditions under one identical
+normalization policy.
+```
+
+- **Evidence:** `reports/goal_v5/continuity/blinded_listener_study/TECHNICAL_SCREEN_RECEIPT.json`
+  = `BLOCKED_STIMULUS_TECHNICAL_CONFOUND`, calibrated against 8 live
+  same-parameter neutral renders (sd 0.793 LKFS, tolerance 2.378). Dream
+  +4.219 LKFS, adversarial +3.749 LKFS, adversarial +1.960 s and an elevated
+  silence floor.
+- **Also cleared:** upstream `resemble-ai/chatterbox#536` (~4.9 kHz vocoder
+  line) is NOT differentially present — all conditions within ±1.9 dB against a
+  3.0 dB tolerance. That specific worry is retired with evidence.
+- **Destination repository:** `grahama1970/chatterbox` — affect-study
+  calibration requirement.
+- **Downstream:** no-adoption-yet. No Chatterbox code change is required by the
+  finding; the requirement is a study-design constraint owned by this repo.
+  Chatterbox-side perceptual validation remains `grahama1970/chatterbox#7`.
+- **Serves criterion:** `voice_value_disposition`.
+
+---
+
+## #1131 — PCTOM-R apparatus can now falsify its own treatment
+
+```text
+Finding:
+A non-degenerate PCTOM-R apparatus can now produce CD losses and uncertain
+baseline effects.
+
+What was falsified:
+Receipt volume and deterministic execution alone establish measurement validity.
+
+Transferable lesson:
+Label diversity, prediction diversity, leakage rejection, sealed commitments,
+and structural ability for every treatment to lose.
+
+Decision:
+Proceed to #1008; do not interpret the toy cue structure itself as evidence
+that dreaming helps.
+```
+
+- **Evidence:** gate returns `PASS_MEASUREMENT_VALIDITY_V2` on the held-out
+  split — 96 labels {TRUE 40, FALSE 24, UNKNOWN 32}, distinct distributions
+  M4/R8/D16/CD30, CD win 18 / tie 26 / **loss 4**. Prevalence baseline Brier
+  0.639; CD 0.467; R's paired CI spans zero. The all-TRUE constant control
+  still blocks with the original three failure modes; 11/11 adversarial
+  controls behave.
+- **Destination repository:** `grahama1970/tau` — the "every treatment must be
+  structurally able to lose" predicate belongs in any Tau-run comparison
+  contract, not only this one.
+- **Downstream:** no PR yet; #1008 now has a scoped local result, but no
+  downstream adoption is justified without a larger preregistered live Tau
+  replication.
+- **Serves criterion:** `cognitive_value_disposition`.
+
+---
+
+## #1008 — Scoped PCTOM-R held-out benefit: CONSTRAIN, not production adoption
+
+```text
+Finding:
+The repaired deterministic held-out apparatus reports a positive CD effect, and
+a one-episode live Tau held-out bridge executes without boundary failures.
+
+What was falsified:
+The prior state "measurement valid but held-out benefit not run" is no longer
+current. The result does not falsify the production skepticism: the live bridge
+is a smoke-sized bridge, not a large live replication.
+
+Transferable lesson:
+A PCTOM result must carry its scope: deterministic held-out benefit, live Tau
+bridge size, coverage receipt, and success-criteria receipt are separate facts.
+
+Decision:
+CONSTRAIN. Retain the PCTOM-R apparatus as local research evidence and require a
+larger preregistered live Tau replication before any production cognitive-value
+claim or downstream adoption.
+```
+
+- **Evidence:** `reports/goal_v5/closure/pctom_final/20260902T165849Z/HELDOUT_CONDITION_BENEFIT_RECEIPT.json`
+  = `PASS_PCTOM_HELDOUT_CONDITION_BENEFIT`, `cd_minus_strongest_baseline=-0.07979999999999995`, strongest baseline `D`.
+- **Bridge evidence:** `reports/goal_v5/closure/pctom_final/20260902T165849Z/LIVE_TAU_HELDOUT_CONDITION_RECEIPT.json`
+  = `PASS_LIVE_TAU_PCTOM_CONDITION_COMPARISON`, one held-out episode / four cases.
+- **Coverage evidence:** `reports/goal_v5/closure/pctom_final/20260902T165849Z/PCTOM_GOAL_COVERAGE_RECEIPT.json`
+  = `PASS_PCTOM_GOAL_COVERAGE`, 15/15 coverage ids, 43 evidence receipts, 12 negative receipts, 0 unbound receipts.
+- **Success-criteria evidence:** `reports/goal_v5/closure/pctom_final/20260902T165849Z/PCTOM_SUCCESS_CRITERIA_RECEIPT.json`
+  = `PASS_PCTOM_SUCCESS_CRITERIA_AUDIT` within the historical text-first PCTOM-R success-criteria contract.
+- **Destination repository:** none yet.
+- **Downstream:** local-only with reason. No adoption until a larger live Tau replication exists.
+- **Serves criterion:** `cognitive_value_disposition`.
+
+---
+
+## 2026-09-02 — Agent listening signoff: MACHINE_PROXY_ONLY, not human perception
+
+```text
+Finding:
+All four blinded listener stimuli passed the agent prescreen gate before human
+collection.
+
+What was falsified:
+The old ordering that treated human listener collection as the next direct step.
+Human listeners are now downstream of a machine/ops signoff gate.
+
+Transferable lesson:
+Chatterbox emotional-quality evidence must distinguish technical/acoustic proxy
+fitness from human-perceived emotion, naturalness, or identity.
+
+Decision:
+CONSTRAIN. Human collection is permitted, but only machine-proxy voice evidence
+is closed. Human-perception claims remain forbidden until 20 valid listener rows
+and `SIGNED_INTERPRETATION.json` exist.
+```
+
+- **Evidence:** `reports/goal_v5/continuity/blinded_listener_study/agent_signoff/20260902T164300Z/AGENT_LISTENING_SIGNOFF.json`
+  = `PASS_AGENT_LISTENING_SIGNOFF`, 4/4 stimuli passed, `human_collection_permitted=true`, `failed_gates=[]`.
+- **Destination repository:** none for the machine-proxy disposition. Chatterbox-side human perceptual validation remains future work only if perception wording is needed.
+- **Downstream:** local-only with reason. The bundle may go to human raters, but machine proof is not human proof.
+- **Serves criterion:** `voice_value_disposition`.
+
+---
+
+## Current dispositions
+
+| Criterion | Status | Owner |
+|---|---|---|
+| `cognitive_value_disposition` | terminal scoped positive: deterministic held-out CD beats strongest D; one live Tau held-out bridge passed; production cognitive value not claimed | #1008 |
+| `voice_value_disposition` | terminal scoped `MACHINE_PROXY_ONLY`: 4/4 stimuli passed agent signoff before human collection; human perception remains unmeasured | #1058 for optional human-perception wording |
+| `persistent_persona_value_disposition` | terminal scoped `BLOCKED_VALID_RESULT`: mechanism works locally, longitudinal adaptation benefit unmeasured | future authorized longitudinal ablation only |
+| `operational_value_disposition` | terminal scoped local reliability/recovery only | #1128/#1129 closed |
+| `transfer_record` | this ledger plus `DISPOSITION_REGISTRY.json` | current |
+| `experimental_invariants_preserved` | holding; strict disposition and current-state gates pass | every lane |
+| `ablation_retirement` | previous-video causality retired; media retained creative-only | current |
+
+---
+
+## #1059 — Previous-video attachment causality: RETIRED, not pursued
+
+```text
+Finding:
+The question is out of scope under the registered immutable goal.
+
+What was falsified:
+Nothing empirically. This is a scope disposition, not an experimental result.
+
+Transferable lesson:
+A goal that names its non-requirements lets work be retired honestly instead of
+being carried indefinitely as "deferred". This is the first use of the
+ablation_retirement criterion.
+
+Decision:
+REJECT / retire. The goal explicitly does not require "generating more Kling
+videos" or "proving that multimodal media beats text". A matched Kling
+continuation A/B serves neither a value disposition nor the transfer contract,
+and would require provider spend.
+```
+
+- **Evidence:** `GOAL.md` non-requirements block; #1059 itself records that the
+  accepted successor changed identity references, frames, prompt lineage, and
+  adjudication together, so previous-video effect was never separable from the
+  other changes without a fresh paid A/B.
+- **Destination repository:** none. Nothing to transfer.
+- **Downstream:** explicit no-adoption decision. The repository continues to
+  state that previous-video attachment benefit is unproven; that statement is
+  now permanent rather than pending.
+- **Serves criterion:** `ablation_retirement`.
+
+---
+
+## #1209 — Requested delivery tone does not change the audio
+
+```text
+Finding:
+Zero acoustic metrics exceeded the renderer's own noise floor for any requested
+tone. emotion_knobs returned null on every render.
+
+What was falsified:
+That routing a dream-derived mood to an accepted delivery tone produces
+audibly different speech. Tone survives normalization (#1202) and is recorded
+(#1208); neither means it reaches the waveform.
+
+Transferable lesson:
+Calibrate the threshold from same-parameter repeats, and report a three-way
+disposition. At n=6 neutral repeats two tones looked audible; at n=10 one was
+marginal; a fresh n=10 showed none. An effect that disappears as the noise
+estimate improves was never an effect, and a two-way pass/fail would have
+published the n=6 run as a success.
+
+Decision:
+CONSTRAIN. Keep the tone mapping — it is honest provenance for what was
+requested — but remove every claim that the mood is made audible. Do not
+pursue acoustic affect through Chatterbox presets; its own health already
+reported preset shifts below stochastic spread and this confirms it.
+```
+
+- **Evidence:** `/tmp/pd-tone-effect/TONE_EFFECT_RECEIPT.json`,
+  `BLOCKED_TONE_BELOW_STOCHASTIC_SPREAD`, 10 neutral repeats, three tones,
+  thresholds derived as `K_SD × published sd`.
+- **Destination repository:** `grahama1970/chatterbox` — a renderer whose
+  presets do not move the waveform should say so in its own capability report
+  rather than accepting the parameter silently.
+- **Downstream:** no adoption. The affect route is closed until a backend
+  exposes structured affect axes that measurably move the audio.
+- **Serves criterion:** `voice_value_disposition`, `ablation_retirement`.
+
+---
+
+## #1210 follow-on — A discussion can re-enter memory without becoming autobiography
+
+```text
+Finding:
+A conversation about a dream can be carried back into memory and drawn into a
+later dream, while remaining distinguishable from something that happened.
+
+What was falsified:
+The assumption that closing the loop is a storage problem. It is a provenance
+problem. Writing turns back as ordinary episodic events is trivial and wrong:
+a human's question then recalls later as an experience the persona had.
+
+Transferable lesson:
+Attribute the record in the DATA, not only in the metadata. A turn is stored
+as record_type=conversation_turn with a speaker and the sha256 of the artifact
+discussed, AND its text is prefixed with who said it -- so a retrieval path
+that drops the metadata still cannot present commentary as an event. It
+recalls as "human said, about my journal entry: ..." rather than as a bare
+fact.
+
+Second lesson, found only by running it: the selector silently dropped the
+carried discussion, because kinds were ranked alphabetically and "code" sorts
+before "conversation". The loop would have looked closed while nothing came
+back. A return arc needs a test that the returned thing is actually DRAWN, not
+merely stored.
+
+Decision:
+ADOPT. This is the boundary that makes a human-in-the-loop memory system safe
+to close at all, and it is independent of dreaming.
+```
+
+- **Evidence:** `reports/goal_v5/closed_loop/CLOSED_LOOP_RECEIPT.json` =
+  `PASS_RETURN_ARC_CLOSED`. 3 turns carried, 3 read back by AQL, drawn into a
+  later dream as an attributed `conversation` kind. Idempotent: the document key
+  is a sha256 over persona, timestamp, role and text, so re-carrying duplicates
+  nothing.
+- **Destination repository:** `grahama1970/graph-memory-operator` — any system
+  that learns from operator interaction faces this boundary, not just this one.
+- **Downstream:** no PR yet. The mechanism lives in persona-dream; the general
+  form is a provenance convention rather than a code change.
+- **Serves criterion:** `transfer_record`, `experimental_invariants_preserved`.
+- **Does not prove:** that a later dream is better for having the conversation.
+  That is the research question, and it is unrun.
+
+---
+
+## Follow-on to #1209 — the whole delivery envelope is inert, not just tone
+
+```text
+Finding:
+On chatterbox_turbo the entire voice_delivery envelope is metadata. Tone, pace
+and pause_strategy are accepted, echoed back in the response, and recorded --
+and none of them changes the audio.
+
+What was falsified:
+The narrower reading of #1209, that requested TONE specifically fails while
+other delivery controls might carry affect. Checked because Chatterbox's own
+project knowledge shows pace and pause_strategy in the delivery envelope, which
+plausibly alter timing on an engine that ignores exaggeration and cfg_weight.
+
+Evidence:
+Two identical neutral renders differed by 0.800 s. A slow render and a fast
+render of the same text differed by 0.200 s -- four times SMALLER than the
+noise between renders that requested nothing different at all.
+
+Transferable lesson:
+When a control is echoed back in a response, that proves request handling and
+nothing else. Chatterbox's tone/emotion stress matrix reports failures at the
+SELECTION layer -- $memory /intent returning memory_confident where deflect or
+boundary was expected. This is a different layer: even when the correct control
+is selected and accepted, the audio cannot express it. Fixing selection will not
+produce audible affect on this engine.
+
+Decision:
+CONSTRAIN, and widen the existing constraint. Do not pursue affect through any
+field of the delivery envelope on this backend. It needs an engine that lists
+affect parameters as supported and demonstrably moves audio.
+```
+
+- **Caveat on strength:** this probe used one render per condition against a
+  two-render noise estimate, so it is a quick check rather than the ten-repeat
+  calibration behind #1209. It is consistent with that fuller measurement and
+  points the same way; it is not independently sufficient.
+- **Destination repository:** `grahama1970/chatterbox` — worth their attention
+  because it bounds what repairing tone *selection* can achieve.
+- **Serves criterion:** `voice_value_disposition`, `ablation_retirement`.
+
+---
+
+## chatterbox#20 resolved — a negative produced a working channel
+
+```text
+Finding:
+Reporting the inert delivery envelope upstream got `pace` implemented as a real
+effect. It is now a deterministic pitch-preserving phase-vocoder time stretch
+applied on every render path, and the renderer declares per field which parts of
+the envelope are audible and which are request-only.
+
+What was falsified:
+Our own widened claim that the ENTIRE delivery envelope is metadata on this
+backend. That was true when measured and is now false for pace. Tone and
+pause_strategy remain request-only, and the renderer now says so itself.
+
+Method note worth keeping:
+The cross-render noise-floor test -- correct for tone -- gave the WRONG answer
+for pace. TTS generation varies 4.08-4.92s independent of pace, which swamps a
+15% stretch, so slow-vs-fast cleared the floor by only 1.5x and read as null.
+The pace_effect receipt provides a PAIRED within-render measurement instead:
+output duration matches input / tempo_factor to under 0.01s. Match the
+instrument to the claim -- an unpaired test against a noisy generator cannot
+detect a modest deterministic transform.
+
+Decision:
+ADOPT pace as an audible delivery channel. Keep the CONSTRAINT on tone.
+```
+
+- **Evidence:** verified live after the upstream deploy — slow 4.60s -> 5.419s
+  at tempo 0.85 (expected 5.412s), fast 4.88s -> 4.139s at tempo 1.18 (expected
+  4.136s). 17.6% longer and 15.3% shorter respectively.
+- **Transferable lesson:** publishing a negative with a reproduction got the
+  capability built. The receipt also degrades honestly — a stretch failure
+  reports `applied: false` with a reason rather than claiming an effect it did
+  not produce, which is the property that made the original defect invisible.
+- **Serves criterion:** `voice_value_disposition`, `transfer_record`.
+
+---
+
+## chatterbox#21 resolved — the mood is now verifiable per render
+
+```text
+Finding:
+Opposing dream tensions produce measurably different applied affect. Isolation
+derives exaggeration 0.435; belonging derives 1.110, 2.55x apart, both with
+applied=true in a per-render affect_effect receipt.
+
+What was falsified:
+Our own reading that emotion_knobs=null meant no affect was applied. It meant
+the knobs were reported per chunk and not at batch top level. The observation
+was right and the inference was wrong -- absence of evidence in the field we
+happened to read.
+
+Two lessons, both about instruments rather than results:
+
+1. A paired receipt beats an acoustic floor. Measuring affect against a
+   4-repeat noise floor gave unstable, near-threshold results and could not
+   distinguish "no effect" from "effect below my ability to see it". The
+   receipt names the applied knobs, so the check became deterministic.
+
+2. Do not claim resolution the channel cannot carry. Chatterbox publishes a
+   response curve: contrasts below 0.5 are inaudible, and single-axis deltas of
+   0.25-0.32 measure below its own noise. Our eight axes each had their own
+   intensity, adjacent ones differing by 0.13 -- inside the dead zone. Eight
+   pseudo-distinct feelings from a channel carrying about two is the same
+   overclaim as requesting a tone the engine ignores. The axes now collapse into
+   bands with a 0.75 contrast.
+
+Decision:
+ADOPT the affect channel at band resolution. Keep tone as provenance only until
+chatterbox#22 calibrates it, at which point this table should be DELETED rather
+than retuned.
+```
+
+- **Method note from the other side, worth keeping:** their harness found a fake
+  tone pass caused by session-long f0 drift in sequential-block runs, and now
+  interleaves floor and arm renders round-robin. Our tone measurement used
+  sequential blocks too — but returned a null, and drift inflates apparent
+  differences, so it biased *towards* a false positive we did not get. The null
+  is conservative. Any future arm comparison here must interleave.
+- **Serves criterion:** `voice_value_disposition`, `transfer_record`.
+
+---
+
+## chatterbox#22 resolved — the downstream workaround is deleted
+
+```text
+Finding:
+The tone vocabulary is calibrated. With emotion_realization=audible the renderer
+derives affect from the tone name (knob_source=tone_calibration): grief_safe ->
+intensity 0.3 / valence -0.7, firm_boundary -> 0.95 / -0.85. All eight axes this
+skill maps resolve to eight distinct settings.
+
+What this retires:
+Our own AXIS_TO_AFFECT table. It is deleted, not retuned -- which is exactly
+what its comment said should happen when #22 landed.
+
+Transferable lesson, and the reason this matters beyond voice:
+When a downstream consumer starts hand-tuning a provider's parameters by
+measuring the provider's output, that is a signal the capability is missing
+upstream, not that the consumer needs better numbers. Every consumer would have
+reinvented that table, differently, and none could have validated it as well as
+the owner can once. The fix was to name the missing capability and file it,
+after first publishing the negative that proved it was missing.
+
+Decision:
+ADOPT the calibrated tone path. RETIRE the local affect table.
+```
+
+- **Sequence worth recording:** a measured negative (#1209) became a filed
+  reproduction (#20), which became a receipt (#21), which became a calibrated
+  capability (#22) — four upstream fixes in one day, each one making the next
+  verifiable. Publishing "this does not work" with a reproduction was the whole
+  mechanism.
+- **Still open:** perceptual validation (`chatterbox#7`), which should now target
+  the calibrated affect path rather than tone presets.
+- **Serves criterion:** `voice_value_disposition`, `transfer_record`,
+  `ablation_retirement`.

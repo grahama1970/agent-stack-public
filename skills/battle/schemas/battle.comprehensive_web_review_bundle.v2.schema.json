@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.comprehensive_web_review_bundle.v2",
+  "title": "Battle comprehensive web review bundle v2",
+  "type": "object",
+  "required": [
+    "schema",
+    "bundle_digest",
+    "entries",
+    "dependency_edges",
+    "review_attempts",
+    "verification_runs",
+    "source_tree_digest",
+    "non_claims"
+  ],
+  "properties": {
+    "schema": {"const": "battle.comprehensive_web_review_bundle.v2"},
+    "bundle_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "generated_at_unix": {"type": "integer"},
+    "repository": {"type": "object"},
+    "source_tree_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "digest_scopes": {"type": "object", "additionalProperties": {"type": "string"}},
+    "manifest_entry_ref": {
+      "type": ["object", "null"],
+      "required": ["manifest_digest", "entry_id", "scope"],
+      "properties": {
+        "manifest_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "entry_id": {"type": "string"},
+        "scope": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "logical_path", "source_path", "disposition"],
+        "properties": {
+          "id": {"type": "string"},
+          "category": {"type": "string"},
+          "logical_path": {"type": "string"},
+          "source_path": {"type": "string"},
+          "disposition": {"enum": ["available", "unavailable"]},
+          "availability_reason": {"type": "string"},
+          "reference_classification": {"enum": ["explicit_json_reference_field"]},
+          "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "blob_path": {"type": "string"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"disposition": {"const": "available"}}},
+            "then": {"required": ["sha256", "bytes", "blob_path"]}
+          }
+        ],
+        "additionalProperties": true
+      }
+    },
+    "dependency_edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from_entry_id", "to_entry_id", "kind"],
+        "properties": {
+          "from_entry_id": {"type": "string"},
+          "to_entry_id": {"type": "string"},
+          "kind": {"type": "string"},
+          "path": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "verification_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["attempt_id", "command", "exit_status", "environment", "source_tree_digest", "artifact_digests"],
+        "properties": {
+          "attempt_id": {"type": "string"},
+          "command": {"type": "array", "items": {"type": "string"}},
+          "exit_status": {"type": "integer"},
+          "environment": {
+            "type": "object",
+            "required": ["python", "platform", "repo_root", "git_head", "battle_status_sha256"],
+            "properties": {
+              "python": {"type": "string"},
+              "platform": {"type": "string"},
+              "repo_root": {"type": "string"},
+              "git_head": {"type": "string"},
+              "battle_status_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            },
+            "additionalProperties": true
+          },
+          "source_tree_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "artifact_digests": {
+            "type": "object",
+            "required": ["manifest"],
+            "properties": {
+              "manifest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "review_attempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["attempt_id", "bundle_digest", "states", "completion_status", "response_attempt_id", "sentinel", "disposition"],
+        "properties": {
+          "attempt_id": {"type": "string"},
+          "bundle_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "response_attempt_id": {"type": "string"},
+          "reviewed_subject_digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+          "response_ref": {"$ref": "#/properties/manifest_entry_ref"},
+          "response_entry_id": {"type": ["string", "null"]},
+          "evidence_refs": {"type": "array", "items": {"$ref": "#/properties/manifest_entry_ref"}},
+          "correction_refs": {"type": "array", "items": {"$ref": "#/properties/manifest_entry_ref"}},
+          "sentinel": {"type": "string"},
+          "completion_status": {"enum": ["not_completed", "completed"]},
+          "evidence_entry_ids": {"type": "array", "items": {"type": "string"}},
+          "correction_entry_ids": {"type": "array", "items": {"type": "string"}},
+          "disposition": {"type": "string"},
+          "states": {
+            "type": "object",
+            "required": ["submission_attempted", "submission_acknowledged", "response_received", "sentinel_validated"],
+            "properties": {
+              "submission_attempted": {"type": "boolean"},
+              "submission_acknowledged": {"type": "boolean"},
+              "response_received": {"type": "boolean"},
+              "sentinel_validated": {"type": "boolean"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "non_claims": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

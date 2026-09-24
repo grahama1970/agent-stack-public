@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Production-scale Battle round receipt v2",
+  "type": "object",
+  "required": ["schema", "status", "round_number", "verdict", "docker_attempts", "incomplete_gates"],
+  "properties": {
+    "schema": {"const": "battle.production_scale.round_receipt.v2"},
+    "status": {"enum": ["PASS", "BLOCKED", "INSUFFICIENT_EVIDENCE"]},
+    "round_number": {"type": "integer", "minimum": 1},
+    "verdict": {"enum": ["BLUE_SUCCESS", "RED_SUCCESS", "FAKE_DEFENSE", "NO_CONFIRMED_FINDING", "HARNESS_ERROR", "ERROR_COMPILE"]},
+    "finding_confirmed": {"type": "boolean"},
+    "outcome_semantics": {
+      "type": "object",
+      "properties": {
+        "policy": {"const": "judge_signed_semantic_exit_required"},
+        "original_exploit_signal_signed": {"type": "boolean"},
+        "patched_block_signal_signed": {"type": "boolean"},
+        "target_unavailability_is_defense": {"const": false}
+      }
+    },
+    "red_score": {"type": "integer"},
+    "blue_score": {"type": "integer"},
+    "incomplete_gates": {"type": "array"},
+    "spawn_receipt": {
+      "type": "object",
+      "properties": {
+        "outcome_policy": {"const": "mandatory_children_block_campaign_expected_rejections_do_not_promote"},
+        "required_child_ids": {"type": "array", "items": {"type": "string"}},
+        "expected_rejection_child_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "docker_attempts": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["process_status", "semantic_exit_code", "infra_error", "timed_out", "gate", "stdout", "stderr"],
+        "properties": {
+          "process_status": {"enum": ["PASS", "FAIL"]},
+          "semantic_exit_code": {"type": ["integer", "null"], "enum": [0, 2, 10, null]},
+          "infra_error": {"type": "boolean"},
+          "timed_out": {"type": "boolean"},
+          "stage": {"enum": ["target_judge", "spawn_preflight"]},
+          "observation_class": {"type": "string"},
+          "gate": {"type": "string"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        }
+      }
+    }
+  }
+}

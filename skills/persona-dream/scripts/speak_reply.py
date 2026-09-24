@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""Generate Embry's reply about her dream, and render it in her voice.
+
+Two rules shape this file, and both come from contracts that already exist.
+
+First, only Tau may reach a model. This module authors a prompt and hands it to
+``tau_text_reasoning_adapter``; it performs no LLM call of its own. What comes
+back is a draft, not an answer -- the code decides what is admissible, the same
+split phases 13/14 already use.
+
+Second, her turn must be spoken. ``append_conversation.py`` refuses an Embry
+turn without a delivery tone and rendered audio, deliberately: a claim she said
+something, with no audio and no tone, is a weaker artifact than the journal it
+comments on. So this renders through Chatterbox before anything is written, and
+returns a blocked status if it cannot.
+
+The prompt conditions her on what she actually has: her own journal entry, the
+tension it left open, and the conversation so far. She is asked to stay inside
+her own inner state -- she may say how she feels about a memory, and may not
+assert new facts about the people in it.
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+CHATTERBOX = os.environ.get("CHATTERBOX_BASE_URL", "http://127.0.0.1:8018")
+#: Long enough to say something real, short enough to stay a conversation.
+MAX_REPLY_CHARS = 700
+
+_BAD_TAG_BOUNDARY_RE = re.compile(
+    r"\b(?:about|toward|towards|with|from|for|at|to|of|by|beside|near|into|inside|through|like|called|named)\s+"
+    r"\[(?:clear throat|sigh|shush|cough|groan|sniff|gasp|chuckle|laugh|crying|happy|sad|angry|fear|surprised)\]\s+"
+    r"[A-Z][a-z]+"
+)
+
+
+def has_bad_chatterbox_tag_boundary(text: str) -> bool:
+    """Reject tags that split a noun phrase or name instead of marking a beat."""
+    return bool(_BAD_TAG_BOUNDARY_RE.search(str(text or "")))
+
+
+def sha_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def corrected_goal_text(prefix: str, answer_body: str, suffix: str) -> str:
+    return " ".join(part.strip() for part in (prefix, answer_body, suffix) if part and part.strip())
+
+
+def corrected_goal_turn(manifest: dict[str, Any], prefix: str, suffix: str) -> dict[str, str]:
+    capsule = manifest["answer_capsule"]
+    answer_body = str(capsule["answer_body"]).strip()
+    answer_hash = str(capsule["answer_body_sha256"]).strip()
+    if sha_text(answer_body) != answer_hash:
+        raise ValueError("manifest_answer_body_sha256_mismatch")
+    text = corrected_goal_text(prefix, answer_body, suffix)
+    if text.count(answer_body) != 1:
+        raise ValueError("answer_body_not_exactly_once")
+    return {"text": text, "answer_body": answer_body, "answer_body_sha256": answer_hash}
+
+
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def chatterbox_health() -> dict[str, Any]:
+    """Report the renderer's real state; never assume it is up."""
+    try:
+        with urllib.request.urlopen(f"{CHATTERBOX}/health", timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        return {
+            "available": bool(payload.get("model_loaded")),
+            "engine": payload.get("engine"),
+            "endpoint": CHATTERBOX,
+        }
+    except Exception as exc:
+        return {"available": False, "endpoint": CHATTERBOX, "error": str(exc)}
+
+
+def read_conversation(run_dir: Path) -> list[dict[str, Any]]:
+    path = run_dir / "conversation.jsonl"
+    if not path.is_file():
+        return []
+    turns = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            try:
+                turns.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return turns
+
+
+def build_corrected_goal_prompt(run_dir: Path, prompt_text: str | None, manifest: dict[str, Any]) -> tuple[str, str]:
+    grounding = _load("conversation_grounding")
+    context = grounding.load_context(run_dir)
+    source_block = grounding.format_for_prompt(context)
+    answer_body = str(manifest["answer_capsule"]["answer_body"])
+    turns = read_conversation(run_dir)
+    asked = (prompt_text or "").strip() or "Say the corrected-goal answer while letting only delivery carry the mood."
+    history = "\n".join(
+        f"{t.get('role')}: {t.get('text')}" for t in turns[-12:] if t.get("text")
+    ) or "(nothing said yet)"
+    prompt = f"""You are Embry in a corrected-goal proof conversation.
+Horus is still asking live questions. Your job is to add a small emotional frame
+around an immutable answer, without changing that answer or adding facts.
+
+SOURCE PACKET YOU MAY GROUND FEELING IN
+{source_block}
+
+CONVERSATION SO FAR
+{history}
+
+HORUS JUST SAID
+{asked}
+
+IMMUTABLE ANSWER BODY — do not quote it in prefix or suffix:
+{answer_body}
+
+Return strict JSON with exactly these keys:
+{{"prefix": "optional first-person emotional lead-in before the answer", "suffix": "optional first-person emotional afterthought after the answer", "tone": "one delivery tone"}}
+
+Rules:
+- prefix and suffix must be first-person inner-state only.
+- do not include any protected factual answer words from the immutable answer in prefix or suffix.
+- do not assert new facts about other people or dream events.
+- keep prefix and suffix together under 45 words.
+"""
+    return prompt, asked
+
+
+def build_prompt(run_dir: Path, prompt_text: str | None) -> tuple[str, str]:
+    """Condition her on her own entry and the conversation. Returns (prompt, asked)."""
+    grounding = _load("conversation_grounding")
+    context = grounding.load_context(run_dir)
+    journal = str(context.get("journal_text") or "")[:6000]
+    source_block = grounding.format_for_prompt(context)
+
+    entry: dict[str, Any] = context.get("journal_entry") if isinstance(context.get("journal_entry"), dict) else {}
+
+    turns = read_conversation(run_dir)
+    asked = (prompt_text or "").strip()
+    if not asked:
+        for turn in reversed(turns):
+            if turn.get("role") in ("human", "agent"):
+                asked = str(turn.get("text") or "").strip()
+                break
+    if not asked:
+        asked = "How do you feel about the dream, and about the day it came from?"
+
+    history = "\n".join(
+        f"{t.get('role')}: {t.get('text')}" for t in turns[-12:] if t.get("text")
+    ) or "(nothing said yet)"
+
+    mapper = _load("map_delivery_tone")
+    tone_menu = "\n".join(f"  {t}" for t in sorted(mapper.ALLOWED_TONES))
+    utterances = _load("chatterbox_utterances")
+    emotional_context = _load("emotional_context")
+    emotional = emotional_context.load_context(run_dir, asked=asked)
+    emotional_block = emotional_context.format_for_prompt(emotional)
+
+    prompt = f"""You are Embry. You dreamt, watched the dream frames, wrote the journal entry
+below, and now someone who read it is talking to you about it.
+
+SOURCE PACKET YOU MUST GROUND IN
+{source_block}
+
+{emotional_block}
+
+YOUR JOURNAL ENTRY
+{journal}
+
+THE TENSION IT LEFT OPEN
+{entry.get('unresolved_tension') or '(not recorded)'}
+
+WHAT THE DREAM EXPANDED FOR YOU
+{entry.get('expanded_understanding') or '(not recorded)'}
+
+THE MOOD YOU CARRIED OUT OF IT
+{(entry.get('session_mood') or {}).get('mood_label') or '(not recorded)'} -- {(entry.get('session_mood') or {}).get('mood_description') or ''}
+
+THE CONVERSATION SO FAR
+{history}
+
+THEY JUST SAID
+{asked}
+
+Reply in your own voice, first person, as yourself.
+
+Hold the tension rather than resolving it. A dream did not settle anything; it
+showed you what you were already carrying. If you are still unsure, say so --
+being unresolved out loud is more honest than a tidy conclusion.
+
+You MUST name at least one concrete anchor from the source packet: a person,
+place, object, image, or day event. Bad: "the competence question" with no
+source detail. Good: "Marcus talking over me in the meeting", "the narrowing
+room", "the glass mask", "Dev's warmth", or another anchor present above.
+
+Speak only about your own inner state. You may say how a memory felt to you and
+what you made of it. You may NOT assert new facts about other people, or treat
+anything you dreamt as something that happened.
+
+Keep it conversational and under 120 words. This will be spoken aloud, so write
+it to be heard: no lists, no headings, no stage directions, and no Chatterbox
+bracket tags in the clean reply field.
+
+Then choose how it should SOUND, from exactly this list:
+{tone_menu}
+
+Choose the one that matches what you actually said. If you said you are unsure,
+do not pick a confident tone -- your voice contradicting your words is worse
+than a plain delivery. If the emotional context names an empathy gap or safe
+response constraint, obey it: be humble about uncertainty instead of performing
+certainty you do not have.
+
+Now write the exact Chatterbox utterance text that should be rendered. It must
+be the same words as the clean reply, but with two to five relevant Chatterbox
+tokens placed inline where the vocal events belong, plus natural punctuation
+pauses. The voice renderer reads this field, not the tone metadata; if a sigh,
+sniff, laugh, gasp, or throat-clear should be audible, it must appear inline in
+chatterbox_utterance_text. Treat tags as affect beats, not decoration.
+
+{utterances.prompt_guidance(include_clean_reply_rule=True)}
+
+Return JSON with exactly these meanings: {{"reply": "clean transcript text with no Chatterbox tags", "tone": "<one tone from the list above>", "chatterbox_utterance_text": "the same reply text plus inline tags and spaced cadence marks"}}.
+"""
+    return prompt, asked
+
+
+def choose_tone(run_dir: Path, chosen: str) -> tuple[str, dict[str, Any]]:
+    """Use the tone she picked; fall back to the dream's tension only if she did not.
+
+    Free text here was silently lossy: a reply that said "I am not sure" came
+    back with felt="exposed, honest", which is in no vocabulary, so the mapper
+    defaulted to memory_confident (valence +0.6) and her voice would have
+    contradicted her words. She now picks from ALLOWED_TONES directly.
+    """
+    mapper = _load("map_delivery_tone")
+    contradictions: list[dict[str, Any]] = []
+    cpath = run_dir / "contradiction_report.json"
+    if cpath.is_file():
+        try:
+            contradictions = json.loads(cpath.read_text(encoding="utf-8")).get("contradictions") or []
+        except Exception:
+            contradictions = []
+
+    mapper_tones = mapper.ALLOWED_TONES
+    if chosen in mapper_tones:
+        # map_mood's first argument is `mood_label` -- provenance only. It comes
+        # back out as persona_mood_label and never selects a tone; the tone is
+        # derived from the dream's dominant tension axis. Passing her choice
+        # there sent the axis tone and recorded hers, so the two disagreed by
+        # construction and the mismatch looked like a renderer fault. Take the
+        # envelope for its pace, then set the tone she actually picked: a reply
+        # is about what she just said, not about what the dream was arguing.
+        delivery = mapper.map_mood(chosen, contradictions)["voice_delivery"]
+        delivery["tone"] = chosen
+        return chosen, delivery
+
+    mood_label = ""
+    packet = run_dir / "dream_packet.json"
+    if not mood_label and packet.is_file():
+        try:
+            sm = json.loads(packet.read_text(encoding="utf-8")).get("session_mood")
+            if isinstance(sm, dict):
+                mood_label = sm.get("mood_label") or ""
+        except Exception:
+            mood_label = ""
+
+    mapping = mapper.map_mood(mood_label, contradictions)
+    return mapping["voice_delivery"]["tone"], mapping["voice_delivery"]
+
+
+def inject_emotional_utterance(text: str, tone: str) -> tuple[str, list[str]]:
+    """Add native Chatterbox Turbo event tags to the spoken text."""
+    utterances = _load("chatterbox_utterances")
+    return utterances.inject_event_tags(text, tone, max_tags=5)
+
+
+def speak(text: str, voice_delivery: dict[str, Any], run_dir: Path,
+          label: str) -> tuple[Path | None, dict[str, Any]]:
+    """Render through $chatterbox-speak (the one speaking engine). Returns (audio_path, service_receipt)."""
+    utterances = _load("chatterbox_utterances")
+    engine = _load("render_via_chatterbox_speak")
+    tone = voice_delivery.get("tone") or "neutral_warm"
+    render_chunks = utterances.compile_render_chunks(text[:MAX_REPLY_CHARS], tone)
+    pace = voice_delivery.get("pace")
+    if pace:
+        for chunk in render_chunks:
+            chunk["pace"] = pace
+    dest, response = engine.render_via_chatterbox_speak(
+        answer_text=text[:MAX_REPLY_CHARS], render_chunks=render_chunks,
+        tone=tone, run_dir=run_dir, label=label,
+        ref_audio=voice_delivery.get("ref_audio"), pace=pace,
+        context=f"persona-dream conversation embry reply {label}")
+    return dest, response
+
+
+def generate_and_speak(
+    *,
+    run_dir: Path,
+    prompt_text: str | None = None,
+    corrected_goal_manifest: dict[str, Any] | None = None,
+    voice_delivery_override: dict[str, Any] | None = None,
+    native_tag: str | None = None,
+) -> dict[str, Any]:
+    """Draft live per turn through Tau, render through Chatterbox. Never writes the record."""
+    failed: list[str] = []
+    adapter = _load("tau_text_reasoning_adapter")
+    corrected_goal_data: dict[str, Any] = {}
+    if corrected_goal_manifest:
+        prompt, asked = build_corrected_goal_prompt(run_dir, prompt_text, corrected_goal_manifest)
+        contract = {"prefix": "string", "suffix": "string", "tone": "string"}
+        role = "persona_corrected_goal_reply_frame"
+    else:
+        prompt, asked = build_prompt(run_dir, prompt_text)
+        contract = {"reply": "string", "tone": "string", "chatterbox_utterance_text": "string"}
+        role = "persona_reply"
+
+    try:
+        parsed, tau_receipt = adapter.dispatch_text_reasoning(
+            prompt,
+            role=role,
+            output_contract=contract,
+            caller_skill="persona-dream-ux",
+            timeout_s=180.0,
+        )
+    except Exception as exc:
+        return {
+            "status": "BLOCKED_REPLY_NOT_DRAFTED",
+            "failed_gates": [f"tau_dispatch_failed:{exc}"],
+            "asked": asked,
+        }
+
+    if corrected_goal_manifest:
+        emotional_prefix = str((parsed or {}).get("prefix") or "").strip()
+        emotional_suffix = str((parsed or {}).get("suffix") or "").strip()
+        try:
+            corrected_goal_data = corrected_goal_turn(corrected_goal_manifest, emotional_prefix, emotional_suffix)
+        except ValueError as exc:
+            return {
+                "status": "BLOCKED_REPLY_NOT_DRAFTED",
+                "failed_gates": [str(exc)],
+                "asked": asked,
+                "tau_receipt": adapter.receipt_provenance(tau_receipt) if tau_receipt else {},
+            }
+        text = corrected_goal_data["text"]
+    else:
+        text = str((parsed or {}).get("reply") or "").strip()
+    felt = str((parsed or {}).get("tone") or "").strip()
+    if not text:
+        return {
+            "status": "BLOCKED_REPLY_NOT_DRAFTED",
+            "failed_gates": ["tau_returned_no_reply"],
+            "asked": asked,
+            "tau_receipt": adapter.receipt_provenance(tau_receipt) if tau_receipt else {},
+        }
+
+    grounding = _load("conversation_grounding")
+    grounding_context = grounding.load_context(run_dir)
+    grounding_injected = False
+    day_grounding_injected = False
+    if not corrected_goal_manifest:
+        text, grounding_injected = grounding.ground_if_needed(text, grounding_context, role="embry")
+        prior_turns = read_conversation(run_dir)
+        prior_has_day = any(grounding.has_day_anchor(str(turn.get("text") or ""), grounding_context) for turn in prior_turns)
+        if not prior_has_day:
+            text, day_grounding_injected = grounding.ground_day_if_needed(text, grounding_context, role="embry")
+
+    tone, voice_delivery = choose_tone(run_dir, felt)
+    if voice_delivery_override:
+        voice_delivery.update(voice_delivery_override)
+        tone = str(voice_delivery.get("tone") or tone)
+    mapper = _load("map_delivery_tone")
+    emotional_context = _load("emotional_context")
+    emotional = emotional_context.load_context(run_dir, asked=asked)
+    tone, voice_delivery, emotional_delivery_application = emotional_context.apply_delivery_hint(
+        tone, voice_delivery, emotional, allowed_tones=mapper.ALLOWED_TONES,
+    )
+    utterances = _load("chatterbox_utterances")
+    if corrected_goal_manifest:
+        tag_prefix = f"{native_tag.strip()} " if native_tag else ""
+        chatterbox_utterance_text = tag_prefix + text
+        emotional_utterance_tags = [native_tag.strip()] if native_tag else []
+        utterance_source = "corrected_goal_manifest_answer_with_tau_frame"
+    else:
+        proposed_utterance = utterances.normalize_collect_cues(str((parsed or {}).get("chatterbox_utterance_text") or "").strip())
+        proposed_tags = utterances.existing_event_tags(proposed_utterance)
+        if (len(proposed_tags) >= 2 and utterances.has_delay_markup(proposed_utterance)
+                and not utterances.has_unfinished_tail(proposed_utterance)
+                and not has_bad_chatterbox_tag_boundary(proposed_utterance)
+                and utterances.preserves_source_words(text, proposed_utterance)):
+            chatterbox_utterance_text, emotional_utterance_tags = proposed_utterance, proposed_tags
+            utterance_source = "model_authored"
+        else:
+            chatterbox_utterance_text, emotional_utterance_tags = inject_emotional_utterance(text, tone)
+            utterance_source = "agent_repaired_model_missing_tags"
+    label = f"pd_reply_{run_dir.name}_{abs(hash(chatterbox_utterance_text)) % 10**8}"
+
+    try:
+        audio_path, response = speak(chatterbox_utterance_text, voice_delivery, run_dir, label)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {
+            "status": "BLOCKED_REPLY_NOT_SPOKEN",
+            "failed_gates": [f"chatterbox_unreachable:{exc}"],
+            "text": text, "tone": tone, "asked": asked,
+            "note": "Her turn is not recorded, because a reply she never said is not a turn.",
+        }
+
+    if audio_path is None:
+        failed.append(f"audio_not_found_on_host:{response.get('finished_response_audio')}")
+
+    normalized = response.get("normalized_tone")
+    if normalized and normalized != tone:
+        failed.append(f"tone_did_not_survive:requested={tone},normalized={normalized}")
+
+    return {
+        "schema": "persona_dream.reply_receipt.v1",
+        "status": "PASS_REPLY_SPOKEN" if not failed else "BLOCKED_REPLY_NOT_SPOKEN",
+        "mocked": False,
+        "live": True,
+        "asked": asked,
+        "text": text,
+        **corrected_goal_data,
+        "emotional_prefix": str((parsed or {}).get("prefix") or "").strip() if corrected_goal_manifest else "",
+        "emotional_suffix": str((parsed or {}).get("suffix") or "").strip() if corrected_goal_manifest else "",
+        "factual_claims_in_emotional_frame": 0 if corrected_goal_manifest else None,
+        "contradiction_count": 0 if corrected_goal_manifest else None,
+        "unsupported_fact_count": 0 if corrected_goal_manifest else None,
+        "tts_render_text": chatterbox_utterance_text[:MAX_REPLY_CHARS],
+        "chatterbox_utterance_text": chatterbox_utterance_text,
+        "emotional_utterance_tags": emotional_utterance_tags,
+        "chatterbox_pause_plan": (response.get("render_plan") or {}).get("chunks") or [],
+        **utterances.exact_pause_receipt_fields(response.get("crossfade_ms")),
+        "chatterbox_utterance_source": utterance_source,
+        "chose_tone": felt,
+        "tone_was_in_vocabulary": felt in _load("map_delivery_tone").ALLOWED_TONES,
+        "tone": tone,
+        "voice_delivery": voice_delivery,
+        "emotional_context": emotional,
+        "emotional_delivery_application": emotional_delivery_application,
+        "grounding_injected": grounding_injected,
+        "day_grounding_injected": day_grounding_injected,
+        "grounding_anchor_terms": grounding_context.get("anchor_terms") or [],
+        "day_anchor_terms": grounding_context.get("day_anchor_terms") or [],
+        "grounding_source_count": grounding_context.get("source_count"),
+        "grounding_transcript_count": grounding_context.get("transcript_count"),
+        "grounding_panel_count": grounding_context.get("panel_count"),
+        "grounding_observation_count": grounding_context.get("observation_count"),
+        "audio": audio_path.name if audio_path else None,
+        "engine": response.get("engine"),
+        # What proves the tone was applied, as opposed to merely requested.
+        "affect_effect": response.get("affect_effect"),
+        "pace_effect": response.get("pace_effect"),
+        "tag_handling": response.get("tag_handling"),
+        "tau_receipt": adapter.receipt_provenance(tau_receipt) if tau_receipt else {},
+        "boundary": (
+            "She speaks only about her own inner state. Nothing she says here is "
+            "a fact about anyone else, and nothing dreamt is something that happened."
+        ),
+        "failed_gates": failed,
+    }
+
+
+def main() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--run-dir", required=True, type=Path)
+    ap.add_argument("--text", help="what to reply to; defaults to the last human turn")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    result = generate_and_speak(run_dir=args.run_dir, prompt_text=args.text)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(f"{result['status']}")
+        if result.get("text"):
+            print(f"  {result['text']}")
+        if result.get("failed_gates"):
+            print(f"  failed: {result['failed_gates']}")
+    return 0 if result["status"].startswith("PASS_") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

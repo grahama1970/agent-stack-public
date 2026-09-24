@@ -1,0 +1,566 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+RUN_SH="${SURF_RUN_SH:-${SKILL_DIR}/run.sh}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  surf gemini.submit --input REQUEST.md --output RESPONSE.md [options]
+
+Options:
+  --input PATH              Prompt file to submit. Required.
+  --output PATH             Clean response path. Required.
+  --raw-output PATH         Raw response path. Default: <output>.raw.md
+  --meta-output PATH        Proof metadata JSON. Default: <output>.meta.json
+  --submitted-output PATH   Submitted prompt with sentinel injection.
+  --sentinel auto|MARKER    Completion marker. Default: auto.
+  --stable-polls N          Unchanged polls after sentinel before returning. Default: 3.
+  --timeout SECONDS         Browser wait timeout. Default: 300.
+  --lock-timeout SECONDS    Wait this long for the shared Surf browser lock.
+  --model MODEL             Optional Gemini model selector label.
+  --tab-id ID               Use this exact Chrome tab as the controlled Gemini tab.
+  --url URL                 Resolve an already-open Gemini tab by exact URL.
+  --no-activate             Background controlled-tab mode. Do not foreground
+                            the tab or its window. Requires --tab-id or --url
+                            so an authenticated Gemini tab is already open.
+  --attach-file PATH        Attach a file to the Gemini message (uses CDP
+                            DOM.setFileInputFiles via the surf chatgpt --file
+                            flag). The prompt body is sent normally; Gemini
+                            reads the attached file alongside it. Use this
+                            instead of inlining large bundles in the prompt
+                            to stay under the OS argv limit.
+  --attach-files PATHS      Comma-separated attachment paths. Gemini wrapper
+                            currently sends one file; pass one local bundle.
+EOF
+}
+
+input=""
+output=""
+raw_output=""
+meta_output=""
+submitted_output=""
+sentinel="auto"
+stable_polls=3
+timeout_s=300
+model=""
+tab_id=""
+target_url=""
+no_activate=0
+attach_files=()
+attach_file_abs=""
+tab_state_file="${SURF_GEMINI_TAB_STATE:-/tmp/surf-gemini-controlled-tab-id}"
+stall_retry_attempts="${SURF_GEMINI_STALL_RETRY_ATTEMPTS:-1}"
+stall_cooldown_s="${SURF_GEMINI_STALL_COOLDOWN_SECONDS:-120}"
+surf_lock_wait_ms="${SURF_LOCK_TIMEOUT_MS:-60000}"
+
+add_attach_files_arg() {
+  local value="$1"
+  local IFS=','
+  local part
+  for part in $value; do
+    if [[ -n "$part" ]]; then
+      attach_files+=("$part")
+    fi
+  done
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --input) input="${2:-}"; shift 2 ;;
+    --output) output="${2:-}"; shift 2 ;;
+    --raw-output) raw_output="${2:-}"; shift 2 ;;
+    --meta-output) meta_output="${2:-}"; shift 2 ;;
+    --submitted-output) submitted_output="${2:-}"; shift 2 ;;
+    --sentinel) sentinel="${2:-}"; shift 2 ;;
+    --stable-polls) stable_polls="${2:-}"; shift 2 ;;
+    --timeout) timeout_s="${2:-}"; shift 2 ;;
+    --lock-timeout) surf_lock_wait_ms="$(( ${2:-0} * 1000 ))"; shift 2 ;;
+    --model) model="${2:-}"; shift 2 ;;
+    --tab-id) tab_id="${2:-}"; shift 2 ;;
+    --url) target_url="${2:-}"; shift 2 ;;
+    --no-activate) no_activate=1; shift ;;
+    --attach-file) attach_files+=("${2:-}"); shift 2 ;;
+    --attach-files) add_attach_files_arg "${2:-}"; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$input" || -z "$output" ]]; then
+  usage >&2
+  exit 2
+fi
+if [[ ! -f "$input" ]]; then
+  echo "Input file not found: $input" >&2
+  exit 2
+fi
+if [[ -z "${SURF_RUN_SH:-}" && ! -S /tmp/surf.sock ]]; then
+  echo "surf gemini.submit requires the surf browser extension socket at /tmp/surf.sock." >&2
+  echo "Run: surf setup" >&2
+  exit 3
+fi
+
+if [[ "$sentinel" == "auto" || -z "$sentinel" ]]; then
+  rand="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+  sentinel="<<<GEMINI_DONE:$(date -u +%Y%m%dT%H%M%SZ):${rand}>>>"
+fi
+
+raw_output="${raw_output:-${output}.raw.md}"
+meta_output="${meta_output:-${output}.meta.json}"
+submitted_output="${submitted_output:-${output}.submitted.md}"
+mkdir -p "$(dirname "$output")" "$(dirname "$raw_output")" "$(dirname "$meta_output")" "$(dirname "$submitted_output")"
+
+prompt="$(cat "$input")"
+submitted_prompt="${prompt}
+
+---
+
+Completion contract for browser automation:
+
+At the very end of your final answer, print exactly:
+
+${sentinel}
+
+Do not print anything after that marker."
+
+printf '%s\n' "$submitted_prompt" > "$submitted_output"
+
+stderr_log="$(mktemp /tmp/surf-gemini-submit-stderr.XXXXXX.log)"
+raw_tmp="$(mktemp /tmp/surf-gemini-submit-raw.XXXXXX.md)"
+export SURF_LOCK_TIMEOUT_MS="$surf_lock_wait_ms"
+args=(gemini_tab "$submitted_prompt" --sentinel "$sentinel" --stable-polls "$stable_polls" --timeout "$timeout_s" --keep-tab)
+if [[ -n "$model" ]]; then
+  args+=(--model "$model")
+fi
+if [[ -n "$tab_id" ]]; then
+  requested_tab_id="$(printf '%s' "$tab_id" | tr -cd '0-9' | head -c 20 || true)"
+  if [[ -z "$requested_tab_id" ]]; then
+    echo "Invalid --tab-id: $tab_id" >&2
+    exit 2
+  fi
+  args+=(--tab-id "$requested_tab_id" --target-tab-id "$requested_tab_id")
+elif [[ -n "$target_url" ]]; then
+  requested_tab_id="$(
+    "$RUN_SH" tab.list 2>/dev/null \
+      | awk -F '\t' -v target="$target_url" '
+          $3 == target { print $1; found=1; exit }
+          target !~ /\/$/ && $3 == target "/" { print $1; found=1; exit }
+          target ~ /\/$/ {
+            without=target
+            sub(/\/$/, "", without)
+            if ($3 == without) { print $1; found=1; exit }
+          }
+        ' \
+      | head -n 1
+  )"
+  if [[ -z "$requested_tab_id" ]]; then
+    echo "No open Chrome tab matched --url: $target_url" >&2
+    echo "Use --tab-id for the exact tab or open the URL before retrying." >&2
+    exit 2
+  fi
+  args+=(--tab-id "$requested_tab_id" --target-tab-id "$requested_tab_id")
+elif [[ -f "$tab_state_file" ]]; then
+  remembered_tab_id="$(tr -cd '0-9' < "$tab_state_file" | head -c 20 || true)"
+  if [[ -n "$remembered_tab_id" ]]; then
+    args+=(--tab-id "$remembered_tab_id")
+    requested_tab_id="$remembered_tab_id"
+  fi
+fi
+
+if [[ "$no_activate" -eq 1 ]]; then
+  if [[ -z "${requested_tab_id:-}" ]]; then
+    echo "--no-activate requires --tab-id (or --url that resolves to an open tab) so we never have to foreground a tab to find one." >&2
+    exit 2
+  fi
+  args+=(--no-activate)
+fi
+
+if [[ "${#attach_files[@]}" -gt 1 ]]; then
+  echo "surf gemini.submit accepts --attach-files for flag parity, but this wrapper sends one attachment. Pass one local bundle." >&2
+  exit 2
+fi
+if [[ "${#attach_files[@]}" -eq 1 ]]; then
+  attach_file="${attach_files[0]}"
+  if [[ ! -f "$attach_file" ]]; then
+    echo "--attach-file: file not found: $attach_file" >&2
+    exit 2
+  fi
+  attach_file_abs="$(readlink -f "$attach_file")"
+  args+=(--file "$attach_file_abs")
+fi
+
+# Pre-run focus snapshot for proof. Best-effort: if focus.state is missing
+# from an older surf-cli, leave the fields as null.
+focus_before_json="$("$RUN_SH" focus.state --json 2>/dev/null || true)"
+
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+stall_retry_count=0
+write_interrupted_meta() {
+  local signal_name="${1:-TERM}"
+  local finished
+  finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cp "$raw_tmp" "$raw_output" 2>/dev/null || true
+  python3 - "$meta_output" "$input" "$submitted_output" "$output" "$raw_output" "$stderr_log" "$sentinel" "$started_at" "$finished" "${requested_tab_id:-}" "$target_url" "$stall_retry_count" "$stall_retry_attempts" "$stall_cooldown_s" "${attach_file_abs:-}" "$signal_name" <<'PY'
+import json, pathlib, sys
+(
+    meta, inp, submitted, out, raw, err, sentinel, started, finished,
+    requested_tab_id, target_url, retry_count, retry_attempts, cooldown_s,
+    requested_attachment, signal_name,
+) = sys.argv[1:]
+raw_text = pathlib.Path(raw).read_text(errors="replace") if pathlib.Path(raw).exists() else ""
+pathlib.Path(meta).write_text(json.dumps({
+    "status": "interrupted",
+    "failure": "submit_interrupted_before_completion",
+    "blocker": "BROWSER_HANDLER_TIMEOUT",
+    "proof_status": "interrupted",
+    "exit_signal": signal_name,
+    "input": inp,
+    "submitted_output": submitted,
+    "output": out,
+    "raw_output": raw,
+    "stderr_log": err,
+    "sentinel": sentinel,
+    "requested_tab_id": requested_tab_id or None,
+    "controlled_tab_id": None,
+    "requested_url": target_url or None,
+    "attach_file": requested_attachment or None,
+    "attachment": None,
+    "attachment_missing": bool(requested_attachment),
+    "attachment_preview_missing": False,
+    "attachment_delivery_proven": False,
+    "stall_retry_count": int(retry_count),
+    "stall_retry_attempts": int(retry_attempts),
+    "stall_cooldown_seconds": int(cooldown_s),
+    "raw_contains_sentinel": sentinel in raw_text,
+    "clean_contains_sentinel": False,
+    "raw_chars": len(raw_text),
+    "clean_chars": 0,
+    "started_at": started,
+    "finished_at": finished,
+}, indent=2) + "\n")
+PY
+  exit 124
+}
+trap 'write_interrupted_meta TERM' TERM
+trap 'write_interrupted_meta INT' INT
+trap 'write_interrupted_meta HUP' HUP
+python3 - "$meta_output" "$input" "$submitted_output" "$output" "$raw_output" "$stderr_log" "$sentinel" "$started_at" "${requested_tab_id:-}" "$target_url" "${attach_file_abs:-}" <<'PY'
+import json, pathlib, sys
+meta, inp, submitted, out, raw, err, sentinel, started, requested_tab_id, target_url, requested_attachment = sys.argv[1:]
+pathlib.Path(meta).write_text(json.dumps({
+    "status": "running",
+    "proof_status": "pending",
+    "input": inp,
+    "submitted_output": submitted,
+    "output": out,
+    "raw_output": raw,
+    "stderr_log": err,
+    "sentinel": sentinel,
+    "requested_tab_id": requested_tab_id or None,
+    "controlled_tab_id": None,
+    "requested_url": target_url or None,
+    "attach_file": requested_attachment or None,
+    "attachment_delivery_proven": False,
+    "started_at": started,
+}, indent=2) + "\n")
+PY
+while true; do
+  set +e
+  if command -v timeout >/dev/null 2>&1; then
+    [[ "$surf_lock_wait_ms" =~ ^[0-9]+$ ]] || surf_lock_wait_ms=60000
+    hard_timeout_s=$((timeout_s + 60 + ((surf_lock_wait_ms + 999) / 1000)))
+    timeout --kill-after=10s "${hard_timeout_s}s" "$RUN_SH" "${args[@]}" > "$raw_tmp" 2> "$stderr_log"
+  else
+    "$RUN_SH" "${args[@]}" > "$raw_tmp" 2> "$stderr_log"
+  fi
+  status=$?
+  set -e
+  if [[ $status -eq 0 ]]; then
+    break
+  fi
+  haystack="$(cat "$stderr_log" "$raw_tmp" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+  if [[ "$stall_retry_count" -ge "$stall_retry_attempts" ]] || \
+     [[ "$haystack" != *"response timeout"* && "$haystack" != *"did not accept submitted prompt"* && "$haystack" != *"system is currently busy"* && "$haystack" != *"temporarily busy"* && "$haystack" != *"high demand"* ]]; then
+    break
+  fi
+  stall_retry_count=$((stall_retry_count + 1))
+  echo "Gemini stalled; cooling down ${stall_cooldown_s}s before retry ${stall_retry_count}/${stall_retry_attempts}." >&2
+  sleep "$stall_cooldown_s"
+  if [[ -n "${requested_tab_id:-}" ]]; then
+    set +e
+    "$RUN_SH" go "https://gemini.google.com/app" --tab-id "$requested_tab_id" --json >/dev/null 2>>"$stderr_log"
+    reset_status=$?
+    set -e
+    if [[ $reset_status -ne 0 ]]; then
+      status=$reset_status
+      echo "Gemini exact-tab reset failed before stalled-response retry." >>"$stderr_log"
+      break
+    fi
+  fi
+done
+finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+trap - TERM INT HUP
+
+# Post-run focus snapshot for proof.
+focus_after_json="$("$RUN_SH" focus.state --json 2>/dev/null || true)"
+
+cp "$raw_tmp" "$raw_output"
+
+if [[ $status -ne 0 ]]; then
+  python3 - "$meta_output" "$input" "$submitted_output" "$output" "$raw_output" "$stderr_log" "$sentinel" "$started_at" "$finished_at" "$status" "${requested_tab_id:-}" "$target_url" "$stall_retry_count" "$stall_retry_attempts" "$stall_cooldown_s" "$attach_file_abs" <<'PY'
+import json, pathlib, sys
+meta, inp, submitted, out, raw, err, sentinel, started, finished, status, requested_tab_id, target_url, retry_count, retry_attempts, cooldown_s, attach_file = sys.argv[1:]
+pathlib.Path(meta).write_text(json.dumps({
+    "status": "failed",
+    "exit_code": int(status),
+    "input": inp,
+    "submitted_output": submitted,
+    "output": out,
+    "raw_output": raw,
+    "stderr_log": err,
+    "sentinel": sentinel,
+    "requested_tab_id": requested_tab_id or None,
+    "requested_url": target_url or None,
+    "attach_file": attach_file or None,
+    "attachment": None,
+    "attachment_missing": bool(attach_file),
+    "attachment_preview_missing": False,
+    "stall_retry_count": int(retry_count),
+    "stall_retry_attempts": int(retry_attempts),
+    "stall_cooldown_seconds": int(cooldown_s),
+    "started_at": started,
+    "finished_at": finished,
+}, indent=2) + "\n")
+PY
+  cat "$stderr_log" >&2
+  exit "$status"
+fi
+
+stable_response_without_sentinel=0
+if grep -Fq "StableResponseWithoutSentinel: true" "$stderr_log"; then
+  stable_response_without_sentinel=1
+fi
+
+if ! grep -Fq "$sentinel" "$raw_output" && [[ "$stable_response_without_sentinel" -ne 1 ]]; then
+  python3 - "$meta_output" "$input" "$submitted_output" "$output" "$raw_output" "$stderr_log" "$sentinel" "$started_at" "$finished_at" "${requested_tab_id:-}" "$target_url" <<'PY'
+import json, pathlib, sys
+meta, inp, submitted, out, raw, err, sentinel, started, finished, requested_tab_id, target_url = sys.argv[1:]
+pathlib.Path(meta).write_text(json.dumps({
+    "status": "missing_sentinel",
+    "input": inp,
+    "submitted_output": submitted,
+    "output": out,
+    "raw_output": raw,
+    "stderr_log": err,
+    "sentinel": sentinel,
+    "requested_tab_id": requested_tab_id or None,
+    "requested_url": target_url or None,
+    "started_at": started,
+    "finished_at": finished,
+}, indent=2) + "\n")
+PY
+  echo "Gemini response did not contain sentinel: $sentinel" >&2
+  exit 4
+fi
+
+python3 - "$raw_output" "$output" "$sentinel" "$stable_response_without_sentinel" <<'PY'
+import pathlib, sys
+raw_path, out_path, sentinel, stable_without_sentinel = sys.argv[1:]
+text = pathlib.Path(raw_path).read_text()
+idx = text.rfind(sentinel)
+if idx == -1:
+    if stable_without_sentinel == "1":
+        pathlib.Path(out_path).write_text(text.rstrip() + "\n")
+        raise SystemExit(0)
+    raise SystemExit("sentinel missing from assistant response")
+# Gemini echoes part of the prompt after the marker, which used to fail the whole
+# lane even though the attributable answer sits before it (agent-skills#1025).
+# The raw capture keeps everything; the clean output truncates at the sentinel and
+# the discarded tail is reported for the receipt.
+after = text[idx + len(sentinel):].strip()
+clean = text[:idx].rstrip() + "\n"
+pathlib.Path(out_path).write_text(clean)
+if after:
+    pathlib.Path(out_path + ".trailing.txt").write_text(after + "\n")
+    sys.stderr.write(
+        "gemini_trailing_sentinel_content_truncated: discarded %d chars after the terminal sentinel\n"
+        % len(after)
+    )
+PY
+
+python3 - "$meta_output" "$input" "$submitted_output" "$output" "$raw_output" "$stderr_log" "$sentinel" "$stable_polls" "$timeout_s" "$started_at" "$finished_at" "${requested_tab_id:-}" "$target_url" "$no_activate" "$focus_before_json" "$focus_after_json" "$stall_retry_count" "$stall_retry_attempts" "$stall_cooldown_s" "${attach_file_abs:-}" <<'PY'
+import json, pathlib, sys
+meta, inp, submitted, out, raw, err, sentinel, stable, timeout_s, started, finished, requested_tab_id, target_url, no_activate_s, focus_before_s, focus_after_s, retry_count, retry_attempts, cooldown_s, requested_attachment = sys.argv[1:]
+raw_text = pathlib.Path(raw).read_text()
+out_text = pathlib.Path(out).read_text()
+stderr_text = pathlib.Path(err).read_text() if pathlib.Path(err).exists() else ""
+tab_id = None
+tab_id_source = None
+activated = None
+tab_was_created = None
+attachment = None
+for line in reversed(stderr_text.splitlines()):
+    if line.startswith("Tab ID:") and tab_id is None:
+        tab_id = line.split(":", 1)[1].strip()
+        tab_id_source = "stderr"
+    elif line.startswith("ControlledTabID:") and tab_id is None:
+        tab_id = line.split(":", 1)[1].strip()
+        tab_id_source = "stderr_controlled_tab_id"
+    elif line.startswith("Activated:") and activated is None:
+        activated = line.split(":", 1)[1].strip() == "true"
+    elif line.startswith("TabWasCreated:") and tab_was_created is None:
+        tab_was_created = line.split(":", 1)[1].strip() == "true"
+    elif line.startswith("Attachment:") and attachment is None:
+        payload = line.split(":", 1)[1].strip()
+        try:
+            attachment = json.loads(payload)
+        except Exception:
+            attachment = {"attached": False, "parse_error": payload}
+    if tab_id is not None and activated is not None and tab_was_created is not None and (not requested_attachment or attachment is not None):
+        break
+if attachment is None and requested_attachment:
+    attachment = {
+        "attached": False,
+        "path": requested_attachment,
+        "name": pathlib.Path(requested_attachment).name,
+        "missing_native_metadata": True,
+    }
+if tab_id is None and requested_tab_id:
+    tab_id = requested_tab_id
+    tab_id_source = "requested_tab_id_fallback"
+contamination = []
+for needle in [
+    "Skip to content",
+    "Chat history",
+    "You said:",
+    "At the very end of your final answer, print exactly:",
+    "Completion contract for browser automation:",
+    "Tab ID:",
+    "Activated:",
+    "TabWasCreated:",
+    "NoActivate:",
+]:
+    if needle in out_text:
+        contamination.append(needle)
+
+def _parse_focus(s):
+    if not s:
+        return {"focusedWindowId": None, "activeTabId": None, "activeTabUrl": None}
+    try:
+        d = json.loads(s)
+    except Exception:
+        return {"focusedWindowId": None, "activeTabId": None, "activeTabUrl": None}
+    return {
+        "focusedWindowId": d.get("focusedWindowId"),
+        "activeTabId": d.get("activeTabId"),
+        "activeTabUrl": d.get("activeTabUrl"),
+    }
+
+focus_before = _parse_focus(focus_before_s)
+focus_after = _parse_focus(focus_after_s)
+focus_changed = (
+    focus_before["focusedWindowId"] != focus_after["focusedWindowId"]
+    or focus_before["activeTabId"] != focus_after["activeTabId"]
+)
+no_activate = no_activate_s == "1"
+
+tab_mismatch = bool(requested_tab_id and tab_id and requested_tab_id != tab_id)
+activation_violation = no_activate and activated is True
+attachment_missing = bool(requested_attachment and not (isinstance(attachment, dict) and attachment.get("attached") is True))
+attachment_preview_missing = bool(
+    requested_attachment
+    and isinstance(attachment, dict)
+    and attachment.get("attached") is True
+    and attachment.get("previewVisible") is False
+)
+status = "completed" if (
+    tab_id
+    and not tab_mismatch
+    and not contamination
+    and (sentinel in raw_text or "StableResponseWithoutSentinel: true" in stderr_text)
+    and sentinel not in out_text
+    and not activation_violation
+    and not attachment_missing
+    and not attachment_preview_missing
+) else "failed"
+if status == "completed":
+    failure = None
+elif activation_violation:
+    failure = "focus_stolen_despite_no_activate"
+elif tab_mismatch:
+    failure = "controlled_tab_id_mismatch"
+elif attachment_missing:
+    failure = "attachment_metadata_missing"
+elif attachment_preview_missing:
+    failure = "attachment_preview_missing"
+else:
+    failure = "missing_controlled_tab_id_or_contaminated_clean_output"
+pathlib.Path(meta).write_text(json.dumps({
+    "status": status,
+    "failure": failure,
+    "input": inp,
+    "submitted_output": submitted,
+    "output": out,
+    "raw_output": raw,
+    "stderr_log": err,
+    "sentinel": sentinel,
+    "requested_tab_id": requested_tab_id or None,
+    "requested_url": target_url or None,
+    "attach_file": requested_attachment or None,
+    "attachment": attachment,
+    "attachment_missing": attachment_missing,
+    "attachment_preview_missing": attachment_preview_missing,
+    "stall_retry_count": int(retry_count),
+    "stall_retry_attempts": int(retry_attempts),
+    "stall_cooldown_seconds": int(cooldown_s),
+    "stable_polls": int(stable),
+    "timeout_s": int(timeout_s),
+    "raw_contains_sentinel": sentinel in raw_text,
+    "stable_response_without_sentinel": "StableResponseWithoutSentinel: true" in stderr_text,
+    "proof_status": (
+        "response_proven"
+        if sentinel in raw_text
+        else "response_proven_without_sentinel"
+        if "StableResponseWithoutSentinel: true" in stderr_text
+        else "missing_sentinel"
+    ),
+    "clean_contains_sentinel": sentinel in out_text,
+    "clean_contamination_markers": contamination,
+    "raw_chars": len(raw_text),
+    "clean_chars": len(out_text),
+    "controlled_tab_id": tab_id,
+    "controlled_tab_id_source": tab_id_source,
+    "controlled_tab_id_mismatch": tab_mismatch,
+    "no_activate": no_activate,
+    "tab_was_created": tab_was_created,
+    "activated": activated,
+    "activation_violation": activation_violation,
+    "focused_window_before": focus_before["focusedWindowId"],
+    "focused_window_after": focus_after["focusedWindowId"],
+    "active_tab_before": focus_before["activeTabId"],
+    "active_tab_after": focus_after["activeTabId"],
+    "focus_changed": focus_changed,
+    "started_at": started,
+    "finished_at": finished,
+}, indent=2) + "\n")
+PY
+
+python3 - "$meta_output" "$tab_state_file" <<'PY'
+import json, pathlib, sys
+meta_path, state_path = map(pathlib.Path, sys.argv[1:])
+meta = json.loads(meta_path.read_text())
+tab_id = meta.get("controlled_tab_id")
+if meta.get("status") == "completed" and tab_id:
+    state_path.write_text(str(tab_id).strip() + "\n")
+PY
+
+cat "$meta_output"
+python3 - "$meta_output" <<'PY'
+import json, pathlib, sys
+meta = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if meta.get("status") != "completed":
+    raise SystemExit(5)
+PY

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.complete_acceptance_receipt.v1",
+  "title": "Complete Battle integrated acceptance and release gate receipt",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "status",
+    "release_authorized",
+    "aggregate_winner_authorized",
+    "requirement_set_id",
+    "requirements_ref",
+    "report_validity",
+    "campaign_completion",
+    "release_eligibility",
+    "aggregate_winner",
+    "requirements_ledger",
+    "attempt_rows",
+    "blockers",
+    "portable_replay",
+    "exact_non_claims",
+    "path"
+  ],
+  "properties": {
+    "schema": {"const": "battle.complete_acceptance_receipt.v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "release_authorized": {"type": "boolean"},
+    "aggregate_winner_authorized": {"type": "boolean"},
+    "requirement_set_id": {"type": "string", "minLength": 1},
+    "requirements_ref": {"type": "object", "required": ["path", "sha256", "schema"]},
+    "report_validity": {"type": "object", "required": ["status", "valid_failed_report_allowed"]},
+    "campaign_completion": {"type": "object", "required": ["status", "winner"], "properties": {"status": {"enum": ["COMPLETE", "INCOMPLETE"]}}},
+    "release_eligibility": {"type": "object", "required": ["status", "missing_or_unproven_requirements"], "properties": {"status": {"enum": ["ELIGIBLE", "BLOCKED"]}}},
+    "aggregate_winner": {"type": "object", "required": ["authorized", "winner", "reason"]},
+    "requirements_ledger": {
+      "type": "array",
+      "minItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "profiles", "release_required", "status", "evidence", "blockers"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "profiles": {"type": "array", "items": {"type": "string"}},
+          "release_required": {"type": "boolean"},
+          "status": {"enum": ["IMPLEMENTED_AND_PROVEN", "IMPLEMENTED_UNPROVEN", "PARTIAL", "MISSING"]},
+          "evidence": {"type": "array"},
+          "blockers": {"type": "array"}
+        }
+      }
+    },
+    "attempt_rows": {"type": "array"},
+    "blockers": {"type": "array"},
+    "portable_replay": {"type": "object", "required": ["status", "commands", "readback_required"]},
+    "exact_non_claims": {"type": "array", "items": {"type": "string"}},
+    "path": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "minLength": 64}
+  }
+}

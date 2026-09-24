@@ -1,0 +1,642 @@
+#!/usr/bin/env bash
+# Strip inherited venv to prevent uv conflicts in cross-skill subprocess calls
+unset VIRTUAL_ENV
+#
+# /ask Skill Runner
+# Low-cognitive-load learning and querying interface.
+# Tightly integrated with /task-monitor for progress tracking.
+#
+# Usage:
+#   ./run.sh learn "Robert Sapolsky" --scope behavioral-psych
+#   ./run.sh ask "Why do humans commit violence?" --scope behavioral-psych --auto-learn
+#   ./run.sh status --scope behavioral-psych
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILLS_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_ROOT="$(dirname "$SKILLS_DIR")"
+
+PROJECT_ROOT="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
+
+# Load .env if present
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    set -a
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
+# Resolve skill runner paths
+MEMORY_RUN="${SKILLS_DIR}/../../.agent/skills/memory/run.sh"
+DISCOVER_BOOKS_RUN="${SKILLS_DIR}/discover-books/run.sh"
+INGEST_YOUTUBE_RUN="${SKILLS_DIR}/../../.agent/skills/ingest-youtube/run.sh"
+EXTRACTOR_RUN="${SKILLS_DIR}/extractor/run.sh"
+TAXONOMY_RUN="${SKILLS_DIR}/taxonomy/run.sh"
+TASK_MONITOR_RUN="${SKILLS_DIR}/../../.agent/skills/task-monitor/run.sh"
+
+# Check which skills are available
+skill_available() {
+    [[ -x "$1" ]] && return 0
+    return 1
+}
+
+run_tau_handler_shortcut() {
+    local handler="$1"
+    shift
+    if [ "$#" -eq 0 ]; then
+        echo "Usage: ./run.sh ${handler} <question>" >&2
+        echo "Routes to: ./run.sh tau-dag <question> --dag-template single-call --handler ${handler} --execute --json" >&2
+        exit 2
+    fi
+
+    local repo="local/ask-skill"
+    local target="skill-ask-${handler}-single-call"
+    local immutable_goal="Answer the user question via the '${handler}' Tau browser handler with a non-empty response."
+    local execute=1
+    local json_output=1
+    local extra_args=()
+    local raw_request=0
+    local request_parts=()
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --compile-only|--no-execute)
+                execute=0
+                shift
+                ;;
+            --execute)
+                execute=1
+                shift
+                ;;
+            --json)
+                json_output=1
+                shift
+                ;;
+            --no-json)
+                json_output=0
+                shift
+                ;;
+            --repo)
+                if [ "$#" -lt 2 ]; then echo "--repo requires a value" >&2; exit 2; fi
+                repo="$2"
+                shift 2
+                ;;
+            --target)
+                if [ "$#" -lt 2 ]; then echo "--target requires a value" >&2; exit 2; fi
+                target="$2"
+                shift 2
+                ;;
+            --immutable-goal)
+                if [ "$#" -lt 2 ]; then echo "--immutable-goal requires a value" >&2; exit 2; fi
+                immutable_goal="$2"
+                shift 2
+                ;;
+            --ask-id|--run-output-root|--poll-timeout-seconds|--poll-interval-seconds|--browser-lock-timeout|--browser-tab-lifecycle|--attach-file)
+                if [ "$#" -lt 2 ]; then echo "$1 requires a value" >&2; exit 2; fi
+                extra_args+=("$1" "$2")
+                shift 2
+                ;;
+            --viewer-link|--local-fixture|--allow-provider-calls|--require-provider-calls|--no-poll)
+                extra_args+=("$1")
+                shift
+                ;;
+            --)
+                shift
+                raw_request=1
+                request_parts+=("$@")
+                break
+                ;;
+            *)
+                request_parts+=("$@")
+                break
+                ;;
+        esac
+    done
+
+    if [ "${#request_parts[@]}" -eq 0 ]; then
+        echo "Usage: ./run.sh ${handler} <question>" >&2
+        exit 2
+    fi
+
+    # Refuse silently swallowing option flags into the question text. Flags
+    # placed AFTER the free-text question land in the *) catch-all above and
+    # would ship to the provider as literal prompt words (observed 2026-08-19:
+    # five --attach-file flags became prompt text; zero files were attached,
+    # requested_attachment_paths=[] in the node receipt). Fail closed and name
+    # the fix; use '--' before the question to intentionally pass raw '--text'.
+    local misplaced_flags=()
+    local part
+    for part in "${request_parts[@]}"; do
+        case "$part" in
+            --*) misplaced_flags+=("$part") ;;
+        esac
+    done
+    if [ "${#misplaced_flags[@]}" -gt 0 ] && [ "${raw_request:-0}" -ne 1 ]; then
+        echo "error [shortcut_flags_after_question]: these look like option flags but arrived after the question text, so they would be sent to the provider as prompt words instead of taking effect: ${misplaced_flags[*]}" >&2
+        echo "Fix: put all options BEFORE the question (./run.sh ${handler} --attach-file f.md \"question...\"), or prefix the question with '--' if it intentionally contains literal '--' tokens." >&2
+        exit 2
+    fi
+
+    local request="${request_parts[*]}"
+    local cmd=(uv run --project "$SCRIPT_DIR" python -m ask.tau_dag_cli run "$request" --repo "$repo" --target "$target" --immutable-goal "$immutable_goal" --dag-template single-call --handler "$handler")
+    if [ "$execute" -eq 1 ]; then
+        cmd+=(--execute)
+    fi
+    if [ "$json_output" -eq 1 ]; then
+        cmd+=(--json)
+    fi
+    cmd+=("${extra_args[@]}")
+    exec "${cmd[@]}"
+}
+
+show_help() {
+    cat <<'EOF'
+/ask — Low-cognitive-load learning and querying
+
+Commands:
+  learn <topic>     Discover, ingest, and extract knowledge about a topic
+  ask <question>    Query accumulated knowledge (with optional auto-learn)
+  status            Show learning progress and task-monitor state
+  setup             Interview-driven setup wizard (safe by default)
+  config            Initialize and validate release configuration
+  doctor            Check runtime prerequisites and artifact writability
+  chains            Inspect saved review workflows
+  nightly           Run scheduled persona update (incremental learning)
+  team-plan <request> Plan a role-based multi-agent team and preview/run its Tau DAG
+  api <transport>   Local API over stdio or a Unix socket (stdio|serve)
+  runs <verb>       Inspect/control runs (list|latest|show|watch|steer|cancel|resume)
+  targets <verb>    Readiness per target kind (list --readiness|doctor kind:sel)
+  herdr <verb>      Talk to another agent's Herdr session by name (list|who|send)
+  tau-dag <request> Compile a human request into a strict Tau DAG
+  webgpt <question>  Shortcut: Tau single-call handler webgpt (also webclaude/webkimi/webgemini/webgrok)
+  compete <request> Compile isolated competitors into a Tau compete DAG
+  one-shot <question> --handler A --handler B  Same question to N seats concurrently; answers per seat, no consensus
+  browser-availability Probe provider tabs for visible rate/capacity blockers
+  os learn          Crawl and index embry-os internals (skills, packages, config)
+  os ask <question> Query OS knowledge from memory (scope=os)
+  os health <question> Query runtime health of an OS subsystem
+  intent <query>    Classify a query into an intent category
+
+Learn Options:
+  --scope <scope>       Memory scope (default: ask)
+  --collection <coll>   Taxonomy collection (default: behavioral)
+  --depth <level>       Learning depth: quick (5-10min), standard (30-60min), deep (hours)
+  -i, --interactive     Use /interview to ask about learning preferences
+  --youtube <url>       Specific YouTube URL to ingest (repeatable)
+  --books-only          Only discover/process books
+  --youtube-only        Only process YouTube content
+  --max-books <n>       Max books to discover (default: 5)
+  --max-videos <n>      Max YouTube videos to process (default: 3)
+  --dry-run             Preview without storing
+  --ask-id <id>         Stable runtime artifact id for this learn call
+  --run-output-root <dir> Directory for request/status/events artifacts
+  --overwrite           Replace an existing run directory for --ask-id
+  --resume              Resume a non-terminal existing run directory for --ask-id
+  --debug               Enable debug logging
+
+Tau DAG Options:
+  --repo <repo>         Repository/project binding for tau.dag_contract.v1
+  --target <target>     Issue, task, path, or work target binding
+  --solver-model <m>    Solver model to run; repeat for concurrent solvers
+  --reviewer-model <m>  Reviewer model used to compare solver outputs
+  --handler <h>         Browser or API handler/model; repeat for roundtable/compete
+  --workflow-mode <m>   roundtable or compete
+  --criterion <c>       Reviewer criterion; repeat for multiple criteria
+  --browser-tab-lifecycle <m> Browser lifecycle: auto, reuse-bound, fresh-temporary, fresh-keep, fresh-shared-temporary, fresh-shared-keep
+  --execute             Send the emitted DAG to $tau after writing dag.json
+  --local-fixture       Use local command workers for deterministic scheduler proof
+  --allow-provider-calls Permit real provider calls through the SciLLM container
+  --require-provider-calls Fail if SciLLM/provider calls are unavailable
+  --viewer-link         Ask Tau for the React Flow DAG viewer link
+  --run-output-root <dir> Directory for request/DAG/Tau receipt artifacts
+  --json                JSON output
+
+Simple model workflow examples:
+  # One-shot: independent answers, no consensus, usable with partial results.
+  ./run.sh one-shot "Review this README packet" --handler webkimi --handler webgpt --attach-file /tmp/review-packet.md --out-dir /tmp/ask-one-shot --window-layout shared
+
+  # Roundtable: one shared packet, concurrent seats, synthesized position.
+  ./run.sh tau-dag "Recommend the safest implementation plan" --repo local/agent-skills --target ask-roundtable --immutable-goal "Return one evidence-backed recommendation with dissent recorded." --dag-template roundtable --topology concurrent --handler webgpt --handler webkimi --handler gpt-5.5-high --browser-tab-lifecycle fresh-shared-keep --execute --json
+
+  # Compete: isolated candidates, scorecard/judge path, local proof still required.
+  ./run.sh compete "Propose the smallest patch for this bug" --repo local/agent-skills --target ask-compete --immutable-goal "Select a locally verifiable patch candidate." --handler webgpt --handler webkimi --handler gpt-5.5-high --criterion correctness --criterion minimality --browser-tab-lifecycle fresh-shared-keep --execute --json
+
+  Browser-window note:
+  one-shot defaults to --window-layout shared: all web model tabs are opened in
+  one reviewer window and placed on Desktop 2 by default
+  (ASK_REVIEWER_DESKTOP=1). Use --window-layout isolated, or pass
+  --browser-tab-lifecycle fresh-temporary/fresh-keep to tau-dag, only when
+  per-window provider visibility isolation is more important than a
+  self-contained operator surface.
+
+Ask Options:
+  --scope <scope>       Memory scope to query (default: ask)
+  --k <n>               Number of results (default: 5)
+  --bridges             Also traverse bridge attributes
+  --auto-learn          Auto-discover and learn if no knowledge found
+  --collection <coll>   Taxonomy collection for auto-learn (default: behavioral)
+  --raw                 Return raw memory results
+  --image-generate      Generate image artifact(s) through scillm
+  --image-model <m>     Image generation model (default: gpt-image-2)
+  --image-size <s>      Image size, for example auto or 1024x1024
+  --image-quality <q>   Image quality, for example auto, medium, or high
+  --image-count <n>     Number of images to generate (default: 1)
+  --image-output <path> Output file or directory for generated image(s)
+  --image-output-format <f> Image format: png, jpeg, or webp
+  --image-timeout <s>   Image generation timeout in seconds
+  --oracle              Use scillm/Codex for final oracle synthesis
+  --oracle-backend <b>  Oracle backend: auto, scillm, subagent-runner
+  --oracle-model <m>    Oracle synthesis model (default: gpt-5.5)
+  --oracle-reasoning <r> Oracle reasoning effort (default: high; deep-review default: xhigh)
+  --oracle-timeout <s>  Oracle HTTP timeout in seconds (default: 300)
+  --oracle-idle-timeout <s> Subagent silence timeout before stalled recovery
+  --oracle-heartbeat-interval <s> Memory heartbeat write interval
+  --oracle-persona <p>  Primary persona/subagent for oracle synthesis
+  --oracle-peer <p>     Second persona/subagent for oracle deliberation
+  --oracle-persona-model <m> Model for primary persona turns
+  --oracle-peer-model <m> Model for peer persona turns
+  --oracle-iterations <n> Sequential oracle deliberation calls (default: 1)
+
+  WebGPT/ChatGPT routing:
+  Use './run.sh webgpt <question>' — it compiles to a Tau single-call DAG
+  (see the 'webgpt' shortcut above). Only the pre-Tau DIRECT WebGPT oracle
+  was removed: --webgpt-* oracle flags fail closed. /ask always executes
+  browser handlers through the Tau harness, never by calling surf directly.
+
+  Other browser oracle backends (--oracle-backend):
+  --gemini-tab-id <id>         Chrome tab id for webgemini
+  --gemini-url <url>           Gemini conversation URL
+  --kimi-tab-id <id>           Chrome tab id for webkimi
+  --kimi-url <url>             Kimi conversation URL
+  --cursor-browser-view-id <id>  Cursor Browser viewId (not Chrome tab id)
+  --cursor-browser-url <url>     ChatGPT URL in Cursor Browser
+  --cursor-browser-project <name>  ~/.pi/cursor-browser-projects/<name>.json
+  --roundtable         Run sequential protocolized persona deliberation
+  --roundtable-personas <p> Comma-separated persona[:role] participants
+  --roundtable-role-preset <p> Role preset (default: adversarial-review)
+  --roundtable-rounds <n> Number of roundtable rounds (default: 2)
+  --roundtable-persist <summary|full> Persist compact state or full turns
+  --parallel-review    Run independent parallel adversarial reviewers
+  --parallel-reviewers <n> Number of default reviewers (default: 3)
+  --parallel-review-personas <p> Comma-separated reviewer persona[:role] specs
+  --parallel-review-focus <f> Comma-separated reviewer focus labels
+  --deep-review         Run read-only deep review with review.md/review.json artifacts
+  --deep-review-target <target> Explicit target: paths, diff, plan, manifest, or artifact
+  --deep-reviewers <n> Reviewer breadth requested for deep review
+  --deep-review-focus <f> Comma-separated deep-review focus labels
+  --chain <name|path> Saved review chain spec
+  --reviewer-spec <name|path> Reviewer spec (repeatable)
+  --dag-json <json>     Execute inline ask/scillm-style DAG JSON
+  --dag-file <path>     Execute ask/scillm-style DAG JSON file
+  --dry-run             Emit execution spec/risk analysis without mutation
+  --dogpile <auto|off|force> Freshness policy for oracle subagents
+  --ask-id <id>      Stable runtime artifact id for this ask call
+  --run-output-root <dir> Directory for request/status/events artifacts
+  --overwrite           Replace an existing run directory for --ask-id
+  --resume              Resume a non-terminal existing run directory for --ask-id
+  --json                JSON output
+  --debug               Enable debug logging
+
+
+Browser-oracle setup (sibling skill: skills/browser-oracle):
+  ./run.sh doctor --from <working-dir> --json
+  Use browser-oracle directly for non-WebGPT reviewer tab bindings.
+  See: skills/browser-oracle/SKILL.md
+
+Status Options:
+  --scope <scope>       Filter by scope
+  --run <id|path>       Show runtime status for an ask id, run dir, or status file
+  --tail-events <n>     Include the last N runtime events with --run
+  --watch               Watch runtime status until terminal
+  --serve               Serve a local auto-updating HTML viewer for --run
+  --open                Open the local HTML viewer in a browser with --serve
+  --serve-port <n>      Port for --serve; 0 selects a free port
+  --serve-ttl-seconds <s> Seconds to keep viewer alive after terminal state
+  --watch-timeout-seconds <s> Maximum seconds to wait with --watch
+  --poll-interval-seconds <s> Polling interval for --watch
+  --runs                List recent runtime runs
+  --limit <n>           Maximum runs to list with --runs
+  --prune               Prune old runtime run directories
+  --older-than-days <n> Age threshold for --prune (default: 14)
+  --dry-run             Preview --prune without deleting
+  --run-output-root <dir> Runtime artifact root for --run ids
+  --json                JSON output
+  --debug               Enable debug logging
+
+Nightly Options:
+  --scope <scope>       Memory scope to update (default: ask)
+  --persona <name>      Update a single persona by name
+  --dry-run             Preview without storing
+  --ask-id <id>         Stable runtime artifact id for this nightly call
+  --run-output-root <dir> Directory for request/status/events artifacts
+  --overwrite           Replace an existing run directory for --ask-id
+  --resume              Resume a non-terminal existing run directory for --ask-id
+  --json                Output summary as JSON
+  --debug               Enable debug logging
+Setup Options:
+  --interactive         Always use /interview for high-level setup choices
+  --profile <profile>   local-dev or shared-stack
+  --dry-run             Preview without writing config or starting services
+  --json                JSON output
+  --yes                 Accept inferred defaults without prompting
+  --start-missing       Explicit consent to start missing services
+
+Doctor Options:
+  --live                Run live subprocess/service checks
+  --json                JSON output
+
+Config Commands:
+  config doctor         Validate ask.config.yml and release prerequisites
+  config init           Launch /interview to create ask.config.yml
+
+Examples:
+  # Learn about a topic
+  ./run.sh learn "Robert Sapolsky" --scope behavioral-psych
+
+  # Ask a question (returns answer from memory)
+  ./run.sh ask "What causes aggression?" --scope behavioral-psych
+
+  # Ask with auto-learn (discovers + ingests if no knowledge exists)
+  ./run.sh ask "What does Sapolsky say about free will?" --scope behavioral-psych --auto-learn
+
+  # Ask with bridge traversal
+  ./run.sh ask "Why is chronic stress harmful?" --scope behavioral-psych --bridges
+
+  # Ask with GPT oracle synthesis
+  ./run.sh ask "What is the strongest interpretation?" --oracle --oracle-reasoning high
+
+  # Natural persona syntax: resolves the stored persona and uses the focused oracle subagent
+  ./run.sh ask Brandon what is the state of space-based cybersecurity in 2016?
+
+  # Ask with persona ping-pong deliberation
+  ./run.sh ask "What should we do?" --oracle --oracle-persona "architect" --oracle-peer "critic" --oracle-iterations 3
+
+  # Ask with GPT-5.5 conversing with a scillm one-shot model
+  ./run.sh ask "What should we do?" --oracle --oracle-backend subagent-runner --oracle-persona "architect" --oracle-peer "DeepSeek critic" --oracle-peer-model opencode-go/deepseek-v4-pro --oracle-iterations 3
+
+  # Natural N-persona roundtable syntax
+  ./run.sh ask Brandon, Margaret, and Jennifer to debate the relevance of Formal Methods in aerospace projects in 2026
+
+  # Explicit protocolized roundtable
+  ./run.sh ask "Formal Methods in aerospace projects in 2026" --roundtable --roundtable-personas "Brandon:failure_mode,Margaret:evidence_auditor,Jennifer:complexity_minimizer" --roundtable-rounds 2
+
+  # Independent parallel adversarial reviewers
+  ./run.sh ask "Review this architecture" --parallel-review --parallel-reviewers 3 --parallel-review-focus correctness,tests,maintainability
+
+  # Pi skill-command browser handler shortcut (executes through Tau, not the removed direct WebGPT oracle)
+  ./run.sh webgpt What is 2 + 2?
+  ./run.sh webgpt --compile-only What is 2 + 2?
+
+  # Compile a strict Tau DAG and stop before execution if fields are incomplete
+  ./run.sh tau-dag "Ask 2 GPT 5.6 xhigh subagents to solve X, then Claude Fable reviews by criteria Y and Z" --repo local/tau --target issue-123 --criterion Y --criterion Z --json
+
+  # Execute the emitted DAG through Tau using local command workers
+  ./run.sh tau-dag "Solve X" --repo local/tau --target issue-123 --solver-model gpt-5.6-xhigh --solver-model gpt-5.6-xhigh --reviewer-model claude-fable --criterion correctness --criterion maintainability --execute --local-fixture --viewer-link --json
+
+  # Compile isolated browser/API competitors into a Tau compete DAG
+  ./run.sh compete "Implement the focused patch, then prepare a winner revision request" --repo local/agent-skills --target ask-compete --handler webgpt --handler webclaude --handler gpt-5.5-high --criterion skill-contract --criterion deterministic-proof --json
+
+  # First-class deep review artifacts
+  ./run.sh ask "deep review this implementation" --deep-review --deep-review-target src/ask/ask.py
+
+  # Learn from specific YouTube lectures
+  ./run.sh learn "behavioral neuroscience" --youtube https://youtube.com/watch?v=NNnIGh9g6fA --scope behavioral-psych
+
+  # Check learning progress
+  ./run.sh status --scope behavioral-psych
+
+  # Task-monitor integration (progress tracked automatically)
+  cat .pi/skills/ask/ask_task_state.json
+
+  # Run nightly persona update
+  ./run.sh nightly --scope behavioral-psych
+
+  # Update a single persona
+  ./run.sh nightly --persona "Lisa Feldman Barrett" --scope behavioral-psych
+EOF
+}
+
+case "${1:-help}" in
+    web)
+        if [ "${2:-}" = "gpt" ]; then
+            shift 2
+            run_tau_handler_shortcut "webgpt" "$@"
+        else
+            echo "Unknown /ask web handler '${2:-}'. Did you mean: webgpt?" >&2
+            exit 2
+        fi
+        ;;
+    webgpt|webclaude|webkimi|webgemini|webgrok)
+        handler="$1"
+        shift
+        run_tau_handler_shortcut "$handler" "$@"
+        ;;
+    api)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.api_cli "$@"
+        ;;
+    runs)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.runs_cli "$@"
+        ;;
+    targets)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.targets_cli "$@"
+        ;;
+    herdr)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.herdr_cli "$@"
+        ;;
+    learn)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.learn "$@"
+        ;;
+    ask)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.ask "$@"
+        ;;
+    setup)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.config_cli setup "$@"
+        ;;
+    status)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.status "$@"
+        ;;
+    config)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.config_cli "$@"
+        ;;
+    doctor)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.doctor "$@"
+        ;;
+    chains)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.chains_cli "$@"
+        ;;
+    nightly)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.nightly "$@"
+        ;;
+    team-plan)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.team_plan_cli "$@"
+        ;;
+    tau-dag)
+        shift
+        case "${1:-run}" in
+            probe-scillm|compete|--help|-h|help)
+                exec uv run --project "$SCRIPT_DIR" python -m ask.tau_dag_cli "$@"
+                ;;
+            *)
+                exec uv run --project "$SCRIPT_DIR" python -m ask.tau_dag_cli run "$@"
+                ;;
+        esac
+        ;;
+    compete)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.tau_dag_cli compete "$@"
+        ;;
+    browser-availability)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/probe_browser_provider_availability.py" "$@"
+        ;;
+    register-browser-cleanup)
+        shift
+        SCHEDULER_RUN="$SKILLS_DIR/scheduler/run.sh"
+        if [[ ! -x "$SCHEDULER_RUN" ]]; then
+            echo "scheduler unavailable: $SCHEDULER_RUN" >&2
+            exit 1
+        fi
+        "$SCHEDULER_RUN" register \
+            --name ask-reap-browser-windows \
+            --cron "*/30 * * * *" \
+            --command "cd $REPO_ROOT && python3 skills/ask/scripts/reap_ask_windows.py --apply" \
+            --description "Close expired Ask-owned browser windows (ownership ledger guarded)"
+        "$SCHEDULER_RUN" register \
+            --name ask-close-stale-tabs \
+            --cron "17 * * * *" \
+            --command "cd $REPO_ROOT && python3 skills/ask/scripts/close_stale_ask_tabs.py --max-age-hours 6 --prune-orphans --apply" \
+            --description "Close stale Ask-owned provider tabs (binding, host, and age guarded)"
+        ;;
+    close-stale-tabs)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/close_stale_ask_tabs.py" "$@"
+        ;;
+    prove-workflow)
+        shift
+        # Probe commands test that /ask works, not answer quality (operator
+        # 2026-08-19): webgpt defaults to its cheapest reasoning here. An
+        # explicit SURF_WEBGPT_REASONING still overrides.
+        export SURF_WEBGPT_REASONING="${SURF_WEBGPT_REASONING:-Instant}"
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/prove_workflow.py" "$@"
+        ;;
+    live-seat-probe)
+        shift
+        export SURF_WEBGPT_REASONING="${SURF_WEBGPT_REASONING:-Instant}"
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/live_seat_probe.py" "$@"
+        ;;
+    seat-ping-ladder)
+        shift
+        export SURF_WEBGPT_REASONING="${SURF_WEBGPT_REASONING:-Instant}"
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/seat_ping_ladder.py" "$@"
+        ;;
+    task-probe)
+        shift
+        export SURF_WEBGPT_REASONING="${SURF_WEBGPT_REASONING:-Instant}"
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/live_task_probe.py" "$@"
+        ;;
+    eval-status)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/eval_status.py" "$@"
+        ;;
+    one-shot)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/one_shot.py" "$@"
+        ;;
+    fix-issues)
+        shift
+        # Diagnose -> (ladder-gated /debugger recommendation) -> verify -> close.
+        # Dry-run by default; --execute closes ONLY after the verify command passes.
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/fix_issues.py" "$@"
+        ;;
+    judge-audit)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/judge_audit.py" "$@"
+        ;;
+    eval-chart)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/eval_chart.py" "$@"
+        ;;
+    eval-loop)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/eval_ticket_loop.py" "$@"
+        ;;
+    handoff)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/ask_handoff.py" "$@"
+        ;;
+    panel-audit)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/ask_panel_audit.py" "$@"
+        ;;
+    unblock)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/ask_unblock.py" "$@"
+        ;;
+    drift)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/ask_drift.py" "$@"
+        ;;
+    prune-outputs)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/prune_ask_outputs.py" "$@"
+        ;;
+    reap-windows)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/scripts/reap_ask_windows.py" "$@"
+        ;;
+    webgpt-project)
+        shift
+        echo "The 'webgpt-project' direct-oracle subcommand was removed. WebGPT itself is still supported: use './run.sh webgpt <question>', which executes through the Tau harness as a single-call DAG." >&2
+        exit 2
+        ;;
+    cursor-browser-project)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.cursor_browser_project_cli "$@"
+        ;;
+    os)
+        shift
+        subcmd="${1:-ask}"
+        shift 2>/dev/null || true
+        case "$subcmd" in
+            learn)
+                exec uv run --project "$SCRIPT_DIR" python -m ask.os_learn "$@"
+                ;;
+            ask)
+                exec uv run --project "$SCRIPT_DIR" python -m ask.os_query ask "$@"
+                ;;
+            health)
+                exec uv run --project "$SCRIPT_DIR" python -m ask.os_query health "$@"
+                ;;
+            *)
+                echo "Unknown os subcommand: $subcmd"
+                echo "Usage: ./run.sh os {learn|ask|health} [options]"
+                exit 1
+                ;;
+        esac
+        ;;
+    intent)
+        shift
+        exec uv run --project "$SCRIPT_DIR" python -m ask.ask_intent "$@"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run './run.sh help' for usage."
+        exit 1
+        ;;
+esac

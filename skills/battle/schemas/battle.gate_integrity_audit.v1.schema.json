@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Battle gate integrity audit v1",
+  "type": "object",
+  "required": ["schema", "status", "run_receipt", "run_receipt_sha256", "false_green_parent_count", "incomplete_gates"],
+  "properties": {
+    "schema": {"const": "battle.gate_integrity_audit.v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "run_receipt": {"type": "string"},
+    "run_receipt_sha256": {"type": ["string", "null"]},
+    "scorekeeper_sha256": {"type": ["string", "null"]},
+    "false_green_parent_count": {"type": "integer", "minimum": 0},
+    "incomplete_gates": {"type": "array"},
+    "backfill_index": {"type": "string"},
+    "backfill_index_sha256": {"type": "string"},
+    "declared_archive_scope_count": {"type": ["integer", "null"], "minimum": 0},
+    "disposition_counts": {"type": "object"},
+    "downstream_revocation_count": {"type": "integer", "minimum": 0}
+  }
+}

@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Persist and exactly reread Persona Dream audio steps 37 and 38."""
+from __future__ import annotations
+
+from pydantic_step_gate import validate_http_json
+
+import argparse
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
+
+import httpx
+
+COLLECTION = "persona_dream_pipeline_steps"
+PLAN_RELATIVE = "phase_11_submit_return/preflight/voice_handoff_plan.json"
+RECEIPT_RELATIVE = "phase_11_submit_return/preflight/voice_handoff_memory_receipt.json"
+SERVER_FIELDS = {
+    "_id", "_rev", "qdrant_collection", "qdrant_point_id", "embedding_model",
+    "embedding_version", "text_hash", "semantic_sync_state",
+}
+
+
+def sha256_file(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read_json(path: Path) -> Any:
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def response_documents(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    validate_http_json("memory_store", dict(payload))
+    value = payload.get("documents") or payload.get("items") or []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def contains_authored_value(observed: Any, expected: Any) -> bool:
+    """Memory merges nested objects on upsert; prove every authored leaf survived."""
+    if isinstance(expected, Mapping):
+        return isinstance(observed, Mapping) and all(
+            key in observed and contains_authored_value(observed[key], value)
+            for key, value in expected.items()
+        )
+    return observed == expected
+
+
+def canonical_record(
+    existing: Mapping[str, Any],
+    *,
+    revision_root: Path,
+    plan: Mapping[str, Any],
+    plan_sha: str,
+    step_no: int,
+    observed_at: str,
+) -> dict[str, Any]:
+    record = {key: value for key, value in existing.items() if key not in SERVER_FIELDS}
+    request_sha = str((plan.get("provider_request") or {}).get("request_body_sha256") or "")
+    transcript_sha = str((plan.get("timed_transcript") or {}).get("sha256") or "")
+    request_dir = (
+        Path("phase_11_submit_return/provider_return")
+        / request_sha.removeprefix("sha256:")
+    )
+    if step_no == 37:
+        return_root = revision_root / request_dir
+        delivery_receipt = read_json(return_root / "voice_delivery_review_receipt.json") or {}
+        rendered = all(
+            isinstance(line, Mapping) and line.get("render_status") == "PASS_EXACT_LINE_RENDER"
+            for line in plan.get("lines", [])
+        )
+        delivery_passed = delivery_receipt.get("status") == "PASS_VOICE_DELIVERY_CONTRACT"
+        status = "PASS_EXACT_LINE_RENDER_READY_FOR_MUX" if rendered and delivery_passed else "FAIL_VOICE_DELIVERY_CONTRACT" if rendered else "BLOCKED_AWAITING_EXACT_LINE_RENDER"
+        blocker = None if rendered and delivery_passed else "render the exact Kai transcript line with a supported restrained conversational cue and persist a passing delivery receipt"
+        proves = "the post-mux voice handoff, exact live Kai line render, and delivery contract are hash-bound" if rendered and delivery_passed else "the current live Kai render does not satisfy the required delivery contract"
+        does_not_prove = "the rendered line has been heard and accepted by a human"
+        disposition = "current_pass" if rendered else "current_pending"
+        delivery_relative = request_dir / "voice_delivery_review_receipt.json"
+        outputs = [PLAN_RELATIVE, str(delivery_relative)] if delivery_receipt else [PLAN_RELATIVE]
+        receipt_paths = outputs
+        artifact_hashes = {path: sha256_file(revision_root / path) for path in outputs}
+    else:
+        return_root = revision_root / request_dir
+        relative_outputs = [
+            request_dir / "muxed_provider_return.mp4",
+            request_dir / "audio_mix_receipt.json",
+            request_dir / "ffmpeg_mux_receipt.json",
+            request_dir / "muxed_provider_return_ffprobe_receipt.json",
+            request_dir / "audible_output_review_receipt.json",
+            request_dir / "dialogue_sync_receipt.json",
+            request_dir / "dialogue_forced_alignment_receipt.v1.json",
+            request_dir / "visible_speaker_lipsync_review.v1.json",
+        ]
+        existing_outputs = [path for path in relative_outputs if (revision_root / path).is_file()]
+        mux_receipt = read_json(return_root / "ffmpeg_mux_receipt.json") or {}
+        audible_receipt = read_json(return_root / "audible_output_review_receipt.json") or {}
+        ffprobe_receipt = read_json(return_root / "muxed_provider_return_ffprobe_receipt.json") or {}
+        sync_receipt = read_json(return_root / "dialogue_sync_receipt.json") or {}
+        alignment_receipt = read_json(return_root / "dialogue_forced_alignment_receipt.v1.json") or {}
+        lipsync_receipt = read_json(return_root / "visible_speaker_lipsync_review.v1.json") or {}
+        muxed_video = return_root / "muxed_provider_return.mp4"
+        muxed_sha = sha256_file(muxed_video) if muxed_video.is_file() else None
+        muxed = (
+            len(existing_outputs) == len(relative_outputs)
+            and mux_receipt.get("status") == "PASS_POST_MUX"
+            and audible_receipt.get("status") == "PASS_DETERMINISTIC_NON_SILENCE"
+            and ffprobe_receipt.get("status") == "PASS_MUXED_RETURN_HAS_AUDIO_STREAM"
+            and sync_receipt.get("status") == "PASS_DIALOGUE_STORYBOARD_SYNC"
+            and all((sync_receipt.get("checks") or {}).values())
+            and alignment_receipt.get("status") == "PASS_FORCED_DIALOGUE_ALIGNMENT"
+            and all((alignment_receipt.get("checks") or {}).values())
+            and lipsync_receipt.get("status") in {
+                "PASS_VISIBLE_SPEAKER_LIPSYNC",
+                "PASS_LIPSYNC_NOT_REQUIRED_SPEAKER_NOT_VISIBLE",
+            }
+            and mux_receipt.get("output_sha256") == muxed_sha
+            and audible_receipt.get("output_sha256") == muxed_sha
+            and ffprobe_receipt.get("output_sha256") == muxed_sha
+            and sync_receipt.get("audio_mix_sha256") == mux_receipt.get("audio_mix_sha256")
+        )
+        if muxed:
+            status = "PASS_POST_MUX_AUDIO_ASSEMBLY"
+            blocker = None
+        elif alignment_receipt.get("status") == "FAIL_FORCED_DIALOGUE_ALIGNMENT":
+            status = "FAIL_FORCED_DIALOGUE_ALIGNMENT"
+            blocker = "rerender the canonical line until local Whisper recognizes the exact text inside the declared transcript interval"
+        elif lipsync_receipt.get("status") == "FAIL_VISIBLE_SPEAKER_NOT_LIPSYNCED":
+            status = "FAIL_VISIBLE_SPEAKER_NOT_LIPSYNCED"
+            blocker = "run a lip-sync pass on the hash-bound MP4 and WAV, then visually review Kai's mouth motion during SB_003"
+        elif sync_receipt.get("status") == "FAIL_DIALOGUE_STORYBOARD_SYNC":
+            status = "FAIL_DIALOGUE_STORYBOARD_SYNC"
+            blocker = "align the rendered line onset to its bound storyboard beat"
+        else:
+            status = "BLOCKED_AWAITING_ACTIVE_PROVIDER_RETURN_AND_AUDIO_MUX"
+            blocker = "produce all hash-bound mux, forced-alignment, and visible-speaker lip-sync review receipts"
+        proves = "the exact Kai line and bound ambient bed were mixed into the active provider return, which contains a hash-bound non-silent audio stream" if muxed else "the final assembly requirements for the active post-mux strategy are durably recorded"
+        does_not_prove = "subjective voice quality or human listening acceptance"
+        disposition = "current_pass" if muxed else "current_pending"
+        outputs = [str(path) for path in existing_outputs] or [PLAN_RELATIVE]
+        receipt_paths = [str(path) for path in existing_outputs if path.suffix == ".json"] or [PLAN_RELATIVE]
+        artifact_hashes = {
+            str(path): sha256_file(revision_root / path)
+            for path in existing_outputs
+        } or {PLAN_RELATIVE: plan_sha}
+    record.update({
+        "status": status,
+        "disposition": disposition,
+        "inputs": {
+            "source_revision_id": str(plan.get("revision_id") or ""),
+            "audio_strategy": "post_mux",
+            "timed_transcript_sha256": transcript_sha,
+            "request_body_sha256": request_sha,
+        },
+        "outputs": outputs,
+        "receipt_paths": receipt_paths,
+        "artifact_hashes": artifact_hashes,
+        "request_hash": request_sha,
+        "provider_task_id": None,
+        "memory_write_method": "/upsert",
+        "claims": {"proves": [proves], "does_not_prove": [does_not_prove]},
+        "blocker": blocker,
+        "observed_at": observed_at,
+        "retrieval_text": (
+            f"Persona Dream {plan.get('run_id')} {plan.get('revision_id')} step {step_no} "
+            f"{record.get('step_name')} status {status} audio strategy post_mux"
+        ),
+        "tags": [
+            "persona-dream",
+            f"run:{plan.get('run_id')}",
+            f"revision:{plan.get('revision_id')}",
+            f"step:{step_no}",
+            f"status:{status.lower()}",
+            "audio-strategy:post-mux",
+            f"disposition:{disposition.replace('_', '-')}",
+        ],
+    })
+    return record
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("revision_root", type=Path)
+    parser.add_argument("--memory-base-url", default="http://127.0.0.1:8601")
+    args = parser.parse_args()
+    revision_root = args.revision_root.expanduser().resolve()
+    plan_path = revision_root / PLAN_RELATIVE
+    if not plan_path.is_file():
+        raise SystemExit(f"voice handoff plan missing: {plan_path}")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    run_id = str(plan.get("run_id") or "")
+    revision_id = str(plan.get("revision_id") or "")
+    if revision_id != revision_root.name or not run_id:
+        raise SystemExit("voice handoff plan run/revision binding invalid")
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    timeout = httpx.Timeout(30.0, connect=2.0)
+    filters = {"run_id": run_id, "revision_id": revision_id}
+    with httpx.Client(base_url=args.memory_base_url, timeout=timeout) as client:
+        before_response = client.post("/list", json={"collection": COLLECTION, "limit": 100, "filters": filters})
+        before_response.raise_for_status()
+        before = response_documents(validate_http_json("memory_list", before_response.json()))
+        by_step = {int(item["step_no"]): item for item in before if "step_no" in item}
+        if len(before) != 42 or 37 not in by_step or 38 not in by_step:
+            raise SystemExit(f"expected 42 records including steps 37/38, found {len(before)}")
+
+        plan_sha = sha256_file(plan_path)
+        documents = [
+            canonical_record(
+                by_step[step_no],
+                revision_root=revision_root,
+                plan=plan,
+                plan_sha=plan_sha,
+                step_no=step_no,
+                observed_at=observed_at,
+            )
+            for step_no in (37, 38)
+        ]
+        write_response = client.post("/upsert", json={"collection": COLLECTION, "documents": documents})
+        write_response.raise_for_status()
+
+        reread_documents = []
+        for expected in documents:
+            response = client.post(
+                "/list",
+                json={"collection": COLLECTION, "limit": 2, "filters": {"_key": expected["_key"]}},
+            )
+            response.raise_for_status()
+            observed = response_documents(response.json())
+            if len(observed) != 1:
+                raise SystemExit(f"exact reread count mismatch for {expected['_key']}: {len(observed)}")
+            for field in ("_key", "status", "inputs", "outputs", "artifact_hashes", "request_hash", "blocker", "claims"):
+                if not contains_authored_value(observed[0].get(field), expected.get(field)):
+                    raise SystemExit(f"exact reread field mismatch for {expected['_key']}: {field}")
+            reread_documents.append(observed[0])
+
+    receipt = {
+        "schema": "persona_dream.voice_handoff_memory_receipt.v1",
+        "status": "PASS_EXACT_REREAD_STEPS_37_38",
+        "collection": COLLECTION,
+        "run_id": run_id,
+        "revision_id": revision_id,
+        "voice_handoff_plan_sha256": plan_sha,
+        "record_count_before": len(before),
+        "updated_step_numbers": [37, 38],
+        "exact_reread_count": len(reread_documents),
+        "exact_reread_keys": [item["_key"] for item in reread_documents],
+        "semantic_sync_states": {item["_key"]: item.get("semantic_sync_state") for item in reread_documents},
+        "mocked": False,
+        "live": True,
+        "observed_at": observed_at,
+        "claims": {
+            "proves": ["audio pipeline steps 37 and 38 are persisted under exact active run/revision keys and exactly reread with hash-bound artifacts"],
+            "does_not_prove": ["subjective voice quality, lip synchronization, or human listening acceptance"],
+        },
+    }
+    receipt_path = revision_root / RECEIPT_RELATIVE
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps({"receipt_path": str(receipt_path), **receipt}, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

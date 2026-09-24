@@ -1,0 +1,239 @@
+/* Canonical names — BATTLE_RACE_ENGINE_PIXI_SPIKE.md */
+.battleRaceStageHost,
+.pixiRaceEngineHost {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.battleRaceTrackPlane,
+.pixiRaceCanvasHost {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: var(--label-w, 290px);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.battleRacePixiCanvas,
+.pixiRaceCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.battlePixiHitMirrorLayer,
+.pixiHitTargetLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 30;
+}
+
+.battlePixiHitMirror,
+.pixiHitTargetMirror {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.battlePixiHitMirror:focus-visible,
+.pixiHitTargetMirror:focus-visible {
+  outline: 2px solid rgba(34, 211, 238, 0.55);
+  outline-offset: 1px;
+}
+
+.pixiHitTargetMirror--event {
+  border-radius: 999px;
+}
+
+.battle-mockup-center .rows.pixiRowsHost {
+  position: relative;
+}
+
+.battle-mockup-center .rows.pixiRowsHost > .battleRaceStageHost {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.battle-mockup-center .rows.pixiRowsHost > .battleRaceStageHost .battleRaceTrackPlane,
+.battle-mockup-center .rows.pixiRowsHost > .battleRaceStageHost .pixiHitTargetLayer {
+  pointer-events: auto;
+}
+
+
+.battle-mockup-center .row.pixiLabelsOnly .track {
+  visibility: hidden;
+}
+
+.battleRacePixiCanvas,
+.pixiRaceCanvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.battlePixiValidationWarning {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 40;
+  max-width: min(420px, 55%);
+  border: 1px solid rgba(255, 210, 77, 0.35);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fde68a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
+  padding: 6px 10px;
+  pointer-events: none;
+}
+
+
+.battle-receipt-pixi-rows {
+  position: relative;
+}
+
+.battle-receipt-pixi-rows > .battleRaceStageHost {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.battle-receipt-pixi-rows > .battleRaceStageHost .battleRaceTrackPlane,
+.battle-receipt-pixi-rows > .battleRaceStageHost .pixiHitTargetLayer {
+  pointer-events: auto;
+}
+
+[data-lane-row].pixiTrackHidden .battle-track-grid {
+  visibility: hidden;
+}
+
+
+/* Sparse receipt races should not leave a giant empty void under two lanes */
+.battle-receipt-pixi-rows {
+  min-height: 0;
+  flex: 0 0 auto;
+}
+
+
+/* Receipt race top-align: sparse fixtures should not float in a black void */
+.battle-mockup-center .rows.pixiRowsHost,
+.battle-receipt-pixi-rows {
+  align-content: start;
+}
+.center.battle-mockup-panel,
+.battle-mockup-center {
+  justify-content: flex-start;
+}
+
+
+/* Receipt + Pixi: slim labels aligned to engine row heights (92/86) */
+.battle-receipt-pixi-lane {
+  display: grid;
+  grid-template-columns: var(--battle-label-w, 290px) minmax(0, 1fr);
+  align-items: stretch;
+  pointer-events: none;
+  z-index: 12;
+}
+.battle-receipt-pixi-lane-label {
+  position: sticky;
+  left: 0;
+  pointer-events: auto;
+  z-index: 18;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 10px 0 12px;
+  border: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(3, 8, 15, 0.82);
+  text-align: left;
+  color: #e2e8f0;
+}
+.battle-receipt-pixi-lane-child .battle-receipt-pixi-lane-label { padding-left: 28px; }
+.battle-receipt-pixi-lane-selected .battle-receipt-pixi-lane-label {
+  background: rgba(57, 242, 120, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(57, 242, 120, 0.22);
+}
+.battle-receipt-pixi-lane-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 77, 92, 0.35);
+  color: #ff6b7a;
+  background: rgba(255, 77, 92, 0.08);
+}
+.battle-receipt-pixi-lane-name {
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.battle-receipt-pixi-lane-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.battle-receipt-pixi-lane-gen {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #8fffb0;
+  white-space: nowrap;
+}
+.battle-receipt-pixi-lane-terminal {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: #8fffb0;
+}
+.battle-receipt-pixi-lane-terminal.blue { color: #7ec0ff; }
+.battle-receipt-pixi-lane-terminal.yellow { color: #ffe070; }
+.battle-receipt-pixi-lane-collapse {
+  pointer-events: auto;
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #cbd5e1;
+}
+.battle-receipt-pixi-rows > .battleRaceStageHost { z-index: 6; }

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "battle.am06.reporting.v1",
+  "title": "Battle AM-06 receipt-derived report",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "status",
+    "battle_id",
+    "fail_closed",
+    "generated_from_receipts_only",
+    "winner",
+    "red_blue_wins",
+    "attempt_rows",
+    "lane_graph",
+    "timing",
+    "incomplete_gates",
+    "false_green_revocations",
+    "replay_commands",
+    "artifact_hashes",
+    "proof_boundary",
+    "required_refs",
+    "problems",
+    "human_report",
+    "path"
+  ],
+  "properties": {
+    "schema": {"const": "battle.am06.reporting.v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "battle_id": {"type": "string", "minLength": 1},
+    "fail_closed": {"const": true},
+    "generated_from_receipts_only": {"const": true},
+    "winner": {"type": ["string", "null"]},
+    "red_blue_wins": {"type": "object"},
+    "attempt_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["row_id", "round_number", "lane", "attempt_label", "gate", "verdict", "judge_authorized_win", "judge_receipt", "artifact_hashes"],
+        "properties": {
+          "row_id": {"type": "string", "minLength": 1},
+          "round_number": {"type": ["integer", "null"]},
+          "lane": {"enum": ["red", "blue", "lineage"]},
+          "attempt_label": {"type": "string", "minLength": 1},
+          "gate": {"type": ["string", "null"]},
+          "verdict": {"type": ["string", "null"]},
+          "judge_authorized_win": {"enum": ["red", "blue", null]},
+          "judge_receipt": {"type": "object"},
+          "artifact_hashes": {"type": "object"}
+        }
+      }
+    },
+    "lane_graph": {
+      "type": "object",
+      "required": ["nodes", "edges"],
+      "properties": {
+        "nodes": {"type": "array"},
+        "edges": {"type": "array"}
+      }
+    },
+    "timing": {"type": "object"},
+    "incomplete_gates": {"type": "array"},
+    "false_green_revocations": {"type": "array"},
+    "replay_commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "command"],
+        "properties": {
+          "label": {"type": "string", "minLength": 1},
+          "command": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "artifact_hashes": {"type": "array"},
+    "proof_boundary": {
+      "type": "object",
+      "required": ["proves", "does_not_prove"],
+      "properties": {
+        "proves": {"type": "array", "items": {"type": "string"}},
+        "does_not_prove": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "required_refs": {"type": "array"},
+    "problems": {"type": "array"},
+    "human_report": {"type": "string", "minLength": 1},
+    "path": {"type": "string", "minLength": 1}
+  }
+}

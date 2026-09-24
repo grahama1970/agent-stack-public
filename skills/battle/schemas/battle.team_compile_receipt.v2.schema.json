@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-skills.local/battle/schemas/battle.team_compile_receipt.v2.schema.json",
+  "title": "Battle team compile receipt v2",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "status", "compile_status", "source_artifact_sha256", "compile_input_sha256", "selected_artifact_sha256", "docker_specimen_sha256", "docker_image", "command", "stderr_sha256", "timeout_s"],
+  "properties": {
+    "schema": {"const": "battle.team_compile_receipt.v2"},
+    "status": {"enum": ["PASS", "BLOCKED"]},
+    "compile_status": {"enum": ["PASS", "FAILED", "BLOCKED"]},
+    "source_artifact_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "compile_input_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "selected_artifact_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "docker_specimen_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "docker_image": {"type": "string"},
+    "docker_image_id": {"type": ["string", "null"]},
+    "command": {"type": "array", "items": {"type": "string"}},
+    "stderr_path": {"type": "string"},
+    "stderr_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "timeout_s": {"type": "integer", "minimum": 1},
+    "provider_route": {"type": "object"},
+    "errors": {"type": "array", "items": {"type": "string"}}
+  }
+}

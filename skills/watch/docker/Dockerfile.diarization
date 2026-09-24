@@ -1,0 +1,14 @@
+ARG WATCH_DIARIZATION_BASE_IMAGE=agent-skills/audio-caption-service:local
+FROM ${WATCH_DIARIZATION_BASE_IMAGE}
+
+ENV PYANNOTE_METRICS_ENABLED=0
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY services/diarization/pyproject.toml /app/pyproject.toml
+COPY services/diarization /app
+RUN python -m pip install --no-cache-dir --upgrade-strategy only-if-needed .
+
+EXPOSE 9001
+ENTRYPOINT []
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9001"]
