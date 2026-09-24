@@ -85,7 +85,7 @@ export function elementAgentApi(skillRoot: string) {
         if (!Number.isInteger(seconds) || seconds < 10 || seconds > 150) throw new Error('Agent timeout must be 10–150 seconds')
         pending.add(s.client_id)
         try {
-          const run = await execute('timeout', ['--kill-after=5s', `${seconds}s`, join(skillRoot, '../ask/run.sh'), 'tau-dag', prompt, '--repo', 'grahama1970/agent-skills', '--target', 'skills/pitchdeck', '--immutable-goal', 'Return a bounded selected-element design proposal without mutating any document.', '--handler', handler, '--execute', '--allow-provider-calls', '--execution-timeout-seconds', '90', '--poll-timeout-seconds', '120', '--run-output-root', join(directory, 'ask'), '--json'], { timeout: (seconds + 10) * 1000, maxBuffer: 12 * 1024 * 1024 })
+          const run = await execute('timeout', ['--kill-after=5s', `${seconds}s`, join(skillRoot, '../ask/run.sh'), 'tau-dag', prompt, '--repo', 'grahama1970/agent-stack', '--target', 'skills/pitchdeck', '--immutable-goal', 'Return a bounded selected-element design proposal without mutating any document.', '--handler', handler, '--execute', '--allow-provider-calls', '--execution-timeout-seconds', '90', '--poll-timeout-seconds', '120', '--run-output-root', join(directory, 'ask'), '--json'], { timeout: (seconds + 10) * 1000, maxBuffer: 12 * 1024 * 1024 })
           writeFileSync(join(directory, 'ask.log'), run.stdout + '\n' + run.stderr)
           current(c, s)
           if (snapshot(c, s).hashes.join() !== context.hashes.join()) throw new Error('Source changed during generation; proposal discarded')

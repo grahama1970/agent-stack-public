@@ -1,10 +1,75 @@
 {
-  "config_sha256": "f58238ef203285911b3b8acabb40f88f98696aaf7443f8fa894e817ec427fd7b",
+  "config_sha256": "cf66e3fc5b19d540fe6f992497ac3f8e2af5d52e39ef397bf265873f7a41fdbf",
   "files": [
     {
       "path": "README.md",
-      "sha256": "32e1e62b1a1976258ce75a1afd780928fc9234f895e3638c1a22006e6cc0ebe1",
-      "size": 1203
+      "sha256": "aafa5a85024913d2f1f788effd513494398062820f9d39e188ee639a1bda9333",
+      "size": 15387
+    },
+    {
+      "path": "docs/assets/agent-skills-header.webp",
+      "sha256": "f373107d779aef3e1e0fd749dec68ee122f1fadcfd8f27302f5e14eab2c38da4",
+      "size": 307986
+    },
+    {
+      "path": "docs/assets/project-cards/battle.webp",
+      "sha256": "30f1f68b0cd00f294f9923e83717c9f20ce7119fdc1f449e8db0ddc1d023a1bc",
+      "size": 105866
+    },
+    {
+      "path": "docs/assets/project-cards/debugger.webp",
+      "sha256": "f62c42cbfd1b87808a6bc87acf5568b2d34f6194225095fd8234c94cfff6d33e",
+      "size": 73546
+    },
+    {
+      "path": "docs/assets/project-cards/dogpile.webp",
+      "sha256": "b85175ec16c0e4b8096e99bb291e19e541ca841e5a11bd5d79af5996952fbae8",
+      "size": 73190
+    },
+    {
+      "path": "docs/assets/project-cards/extractor-workshop.webp",
+      "sha256": "b4191f443f2d8c27ee11002b341d41f95f3288c785b726d4799f8e7bc9934df1",
+      "size": 132118
+    },
+    {
+      "path": "docs/assets/project-cards/memory.webp",
+      "sha256": "b31c441e2220e071c79f5bf15529e4c292ed5227f428e8ab7bd9e6692c2418fa",
+      "size": 15544
+    },
+    {
+      "path": "docs/assets/project-cards/persona-dream.webp",
+      "sha256": "5752d86ed119d51807608731aeb4bc7ef9cfa918ef6b74b05af7a031036be4eb",
+      "size": 99058
+    },
+    {
+      "path": "docs/assets/project-cards/scillm.webp",
+      "sha256": "c12df353c6210172c0fddbf41e7edc85c01e3dc9226bbe3231ab6ba2f0ff6931",
+      "size": 61706
+    },
+    {
+      "path": "docs/assets/project-cards/sparta-explorer.webp",
+      "sha256": "16a631da9edc9d6132cf3a9d665498a3cb98569cddb528bd0c62521be5f38cd8",
+      "size": 35944
+    },
+    {
+      "path": "docs/assets/project-cards/surf.webp",
+      "sha256": "af34c373e6fb69a3564baa86087247f29ce32772c5eef910330afbd9d44bad13",
+      "size": 62334
+    },
+    {
+      "path": "docs/assets/project-cards/tau.webp",
+      "sha256": "85cbe9ba8d437c4a11c2abef6e753173d06a8389f3d4b0024f16cd96493e8fef",
+      "size": 68630
+    },
+    {
+      "path": "docs/assets/project-cards/watch.webp",
+      "sha256": "b95026c68fc285e6cb041620c1d4c5d57113cf491590dd2b1693dc402ea32dd8",
+      "size": 62458
+    },
+    {
+      "path": "site/scripts/gen_inventory.py",
+      "sha256": "68b3e9580203e0af09fc8d3d490a52af3f11cc47a850a8ccb292df0fbb587bb5",
+      "size": 3406
     },
     {
       "path": "skills/agent-inbox/SKILL.md",
@@ -7971,8 +8036,8 @@
     },
     {
       "path": "skills/best-practices-prompt/SKILL.md",
-      "sha256": "7302d1df263527c6584df288c9b24869b76c81ba2c410881f251937b382f8387",
-      "size": 34254
+      "sha256": "65a5d4b2642b45dce0d0ed3cc5c5f06df1f76a14f31c730e7d1271e541ffd3cb",
+      "size": 35704
     },
     {
       "path": "skills/best-practices-prompt/references/extraction.md",
@@ -24781,8 +24846,8 @@
     },
     {
       "path": "skills/monitor-website/scripts/monitor_website.py",
-      "sha256": "29c2daf0959899f9a6fbc22fb48393f8daa58130ac90301feaa79d529d2ae631",
-      "size": 41584
+      "sha256": "69d2b74bb95c3c4ff70512bf8de89fd2d13c9a10661cde5ccdb3433fd682bb9b",
+      "size": 41982
     },
     {
       "path": "skills/monitor-website/scripts/responsive_geometry_check.mjs",
@@ -24821,8 +24886,8 @@
     },
     {
       "path": "skills/monitor-website/tests/test_grahamaco_update.py",
-      "sha256": "f9dc369c5af97eef35a2c29d35e01cbe25e65acbb6f6df2d8686d8b8f4487083",
-      "size": 10049
+      "sha256": "5cef1a40aafa2ba6bc18690acebe9be855b3938c19b15bca83fa651045a3b244",
+      "size": 10574
     },
     {
       "path": "skills/monitor-workstation/SKILL.md",
@@ -33241,8 +33306,8 @@
     },
     {
       "path": "skills/pitchdeck/docs/PROJECT_KNOWLEDGE.md",
-      "sha256": "75d7d36be4bd6c381a2f1e706e0fdbc61993df5b9c17c9432a0933b250c7337a",
-      "size": 52932
+      "sha256": "bf3404ede6f8c0f2114d5fa376a7c083d52573afe57cd98644900d177dac697d",
+      "size": 52931
     },
     {
       "path": "skills/pitchdeck/docs/RESPONSIVE_BROWSER.md",
@@ -33631,8 +33696,8 @@
     },
     {
       "path": "skills/pitchdeck/skill_bundle_receipt.json",
-      "sha256": "40ff6bb474ef520b3c6cdbf1c683baa8d97f08884cbe996456f35541cdabeecf",
-      "size": 8656
+      "sha256": "13f3eaac452f0d8c3b16d82c8397489974b02ecc1098e5b1a1158f38da229f4e",
+      "size": 8655
     },
     {
       "path": "skills/pitchdeck/src/pitchdeck/__init__.py",
@@ -37151,8 +37216,8 @@
     },
     {
       "path": "skills/pitchdeck/ui/server/element-agent.ts",
-      "sha256": "48cd1f65afe8fb3c6d9b00f4c2d5dd06da9ce0012db9e55377ad80d9f0fccccb",
-      "size": 12610
+      "sha256": "ce19b86ea838f4f6e71331347a82f980f02fcdcbf8c2631b42cab545c921f5ad",
+      "size": 12609
     },
     {
       "path": "skills/pitchdeck/ui/server/theme-api.ts",
@@ -49000,7 +49065,7 @@
       "size": 8748
     }
   ],
-  "files_sha256": "c73ef15db6af697f9048364413a443890671f7feb2b5cd3dadb284c09247e0b1",
+  "files_sha256": "2c3af60c1a1d91f1f30666a3e4b3b67f2fdf5c6742184088f228219d0ea00cf9",
   "redactions": {
     "files": {
       "skills/align/scripts/align.py": {
@@ -50461,7 +50526,7 @@
     "webgpt-review",
     "writing-style"
   ],
-  "source_ref": "origin/main",
+  "source_ref": "HEAD",
   "source_repo": "grahama1970/agent-stack",
-  "source_sha": "f5fa43b542d2e5bd5b364cf041fdea516ff83e48"
+  "source_sha": "3fe333c86ba45d73a3b885cb86471faab8687698"
 }

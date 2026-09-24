@@ -37,7 +37,7 @@
       "The Sparta example contains a 12-slide public structure and a seven-slide private technical appendix."
     ],
     "does_not_prove": [
-      "The skill has been installed into grahama1970/agent-skills or passed that repository CI.",
+      "The skill has been installed into grahama1970/agent-stack or passed that repository CI.",
       "The current Sparta README claims match the live codebase or runtime.",
       "The real Sparta screenshots have been recaptured from the current demonstration commit.",
       "A generated deck has been imported into and visually approved in Google Slides."

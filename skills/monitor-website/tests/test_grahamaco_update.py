@@ -90,7 +90,7 @@ def test_audit_uses_inventory_stats_not_stale_readme_counts(tmp_path, monkeypatc
 | Skills | 1 |
 | With `sanity.sh` | 1 |
 | Agent directories | 1 |
-<a href="https://github.com/grahama1970/agent-skills/blob/main/skills/tau/README.md">
+<a href="https://github.com/grahama1970/agent-stack-public/blob/main/skills/tau/README.md">
   <img src="tau.webp">
 </a>
 <br/><strong>T'au</strong><br/><em>Memory-First Zero-Trust Agent Harness</em>
@@ -133,7 +133,7 @@ def test_apply_sync_preserves_inventory_stats_and_extra_site_projects(tmp_path, 
 | Skills | 1 |
 | With `sanity.sh` | 1 |
 | Agent directories | 1 |
-<a href="https://github.com/grahama1970/agent-skills/blob/main/skills/tau/README.md">
+<a href="https://github.com/grahama1970/agent-stack-public/blob/main/skills/tau/README.md">
   <img src="tau.webp">
 </a>
 <br/><strong>T'au</strong><br/><em>Memory-First Zero-Trust Agent Harness</em>
@@ -173,8 +173,8 @@ def test_apply_sync_preserves_inventory_stats_and_extra_site_projects(tmp_path, 
 def test_project_provenance_accepts_intentional_dual_links():
     module = load_module()
     readme_projects = [
-        {"slug": "tau", "href": "https://github.com/grahama1970/agent-skills/blob/main/skills/tau/README.md"},
-        {"slug": "extractor", "href": "https://github.com/grahama1970/agent-skills/blob/main/skills/extractor/README.md"},
+        {"slug": "tau", "href": "https://github.com/grahama1970/agent-stack-public/blob/main/skills/tau/README.md"},
+        {"slug": "extractor", "href": "https://github.com/grahama1970/agent-stack-public/blob/main/skills/extractor/README.md"},
     ]
     site_projects = [
         {"slug": "tau", "href": "https://github.com/grahama1970/tau"},
@@ -267,3 +267,13 @@ def test_visibility_generator_keeps_configured_overview_when_remote_visibility_u
     assert memory["evidence_access"] == "abstract"
     assert memory["href"] == "https://github.com/grahama1970/memory-public"
     assert generated["hidden"] == []
+
+
+def test_skill_contract_href_only_for_public_export_allowlist():
+    module = load_module()
+    assert module._agent_skills_skill_contract_href("tau") == (
+        "https://github.com/grahama1970/agent-stack-public/blob/main/skills/tau/README.md"
+    )
+    # deny_skills / unlisted skills are not in agent-stack-public: never linked.
+    for slug in ("live-evidence", "resume", "ops-linkedin", "monitor-website-does-not-exist"):
+        assert module._agent_skills_skill_contract_href(slug) is None

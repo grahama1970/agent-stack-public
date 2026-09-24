@@ -659,7 +659,7 @@ moat; visual-diff xfail blocks fundraise-grade claims.
 
 ## Tickets filed from roundtable + scope decisions (2026-08-06)
 
-Label roundtable-2026-08-06 on grahama1970/agent-skills:
+Label roundtable-2026-08-06 on grahama1970/agent-stack:
 - #1225 decision memory across commits (gates #1229)
 - #1226 span-first claim model + RENDERING_UNBOUND/NUMERIC_UNBOUND (gates #1232)
 - #1227 writable keyboard triage Claims mode (gates #1228)

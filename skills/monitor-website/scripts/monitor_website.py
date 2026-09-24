@@ -66,14 +66,27 @@ def read_inventory_stats() -> dict:
     return json.loads(INVENTORY.read_text(encoding="utf-8")).get("stats", {})
 
 
+def _public_skill_allowlist() -> frozenset[str]:
+    sys.path.insert(0, str(REPO / "site" / "scripts"))
+    try:
+        from public_skills import public_skills  # noqa: PLC0415
+    finally:
+        sys.path.pop(0)
+    return public_skills(REPO / "public-export.yaml")
+
+
 def _agent_skills_skill_contract_href(slug: str) -> str | None:
+    """agent-stack-public contract link, only for skills in public-export.yaml."""
+    if slug not in _public_skill_allowlist():
+        return None
     skill_dir = REPO / "skills" / slug
     if not skill_dir.exists():
         return None
+    base = "https://github.com/grahama1970/agent-stack-public/blob/main/skills"
     if (skill_dir / "README.md").exists():
-        return f"https://github.com/grahama1970/agent-skills/blob/main/skills/{slug}/README.md"
+        return f"{base}/{slug}/README.md"
     if (skill_dir / "SKILL.md").exists():
-        return f"https://github.com/grahama1970/agent-skills/blob/main/skills/{slug}/SKILL.md"
+        return f"{base}/{slug}/SKILL.md"
     return None
 
 
@@ -81,7 +94,7 @@ def _project_provenance(site_project: dict, readme_project: dict | None = None) 
     overview_href = site_project.get("href")
     readme_href = readme_project.get("href") if readme_project else None
     skill_contract_href = None
-    if readme_href and "/agent-skills/blob/main/skills/" in readme_href:
+    if readme_href and "/agent-stack-public/blob/main/skills/" in readme_href:
         skill_contract_href = readme_href
     skill_contract_href = skill_contract_href or _agent_skills_skill_contract_href(site_project["slug"])
     return {

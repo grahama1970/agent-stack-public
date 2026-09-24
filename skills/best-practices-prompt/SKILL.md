@@ -86,6 +86,32 @@ Load specialized rulesets based on prompt type:
 | **Any prompt** | Core rules below | 0-15: no weasel words, concrete nouns, schema, examples |
 | **Debugging failures** | [`references/incidents.md`](references/incidents.md) | Pattern library of past prompt failures |
 
+## Rule S: Models Never Return Prose (NON-NEGOTIABLE, operator 2026-09-24)
+
+### Rule: `output-json-fields-only`
+
+Every model output is a JSON object whose fields are fixed by a Pydantic model.
+No model ever returns a free-prose answer, narration, summary, or explanation
+for a consumer to display or concatenate. Required pipeline:
+
+1. **Model → JSON fields.** The prompt specifies the exact schema (Rules 2, 3,
+   12, 13) with hard quantities per field (e.g. `direct_answer`: one sentence,
+   max 20 words; `steps[].point`: one sentence, max 15 words).
+2. **Pydantic validation.** The consumer validates with a strict model
+   (`extra="forbid"`, word/sentence-count validators, closed enums). Invalid
+   output is rejected, never repaired into prose or truncated.
+3. **`$jev` judgment.** A bounded Jev choice question scores the validated
+   fields against the supplied evidence (answers-the-question and
+   grounded-in-source distributions). `rejected`/`uncertain`/`unavailable`
+   stay distinct and block acceptance; they are never coerced to success.
+4. **Deterministic rendering.** Only code turns fields into display or speech
+   (headline, source chip, numbered steps). Code never glues model text into
+   paragraphs.
+
+Observed 2026-09-24: explain-project's `ExplainerStep.spoken: str` (max 2000
+chars) let the authoring model write narration; the cockpit concatenated every
+step into an unscannable 110-word paragraph with no source file.
+
 ## Quick Reference (Core Rules 0-15)
 
 | Rule | Code | One-liner |
